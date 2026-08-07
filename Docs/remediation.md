@@ -129,9 +129,7 @@ Before actual cleanup:
 10. After reboot, preferably sign in through the physical, hypervisor, or
     out-of-band console with a local administrator account.
 
-Based on the observed correlation between the repeated WNF family and Gateway-mediated RDS user activity, it is advisable to keep Gateway users disconnected during cleanup and avoid using a Gateway session for the maintenance work. A physical, hypervisor, or out-of-band console session is preferred. A direct RDP session that does not traverse the Gateway may be lower risk, but this was not specifically validated during the investigation. 
-
-This is a precautionary recommendation: the investigation did not identify RD Gateway itself as the writer or establish that a direct non-Gateway RDP session would interfere with cleanup.
+Based on the observed correlation between the repeated WNF family and Gateway-mediated RDS user activity, it is advisable to keep Gateway users disconnected during cleanup and avoid using a Gateway session for the maintenance work. A physical, hypervisor, or out-of-band console session is preferred. A direct RDP session that does not traverse the Gateway may be lower risk, but this was not specifically validated during the investigation. This is a precautionary recommendation: the investigation did not identify RD Gateway itself as the writer or establish that a direct non-Gateway RDP session would interfere with cleanup.
 
 ## Automatic registry backup
 
