@@ -66,17 +66,19 @@ When the system can no longer complete per-user AppContainer creation and AppX r
 This is why repeatedly rebuilding individual profiles or broadly re-registering AppX packages may fail to solve the underlying server-level condition.
 
 
-## Originating-case evidence snapshot
+## Evidence supporting the cleanup target
 
-The cleanup target and documentation are grounded in a specific Server 2019 incident rather than a generic value-count threshold.
+The remediation logic is based on a specific WNF registration structure that was extensively analyzed before cleanup was considered. The important finding was not a particular registry-value count, but the combination of a very large repeated system-scoped family, broad AppX/AppContainer failures, and an absence of observable live activity across the target family.
 
-The affected host contained 261,024 root values, including 256,746 exact members of one 72-byte metadata-`0x011` family and 4,277 members of the separate 136-byte metadata-`0x091` user/AppContainer family.
+In the originating investigation, the Notifications key had grown into the hundreds of thousands of values, with the overwhelming majority belonging to one identical 72-byte metadata-0x011 system-scoped family. A separate 136-byte metadata-0x091 user/AppContainer family showed structured per-user security descriptors and was treated as legitimate data that must be preserved.
 
-A full live audit of all 256,746 target-family values, performed while users were active, completed without native-query failures. All 256,746 state names still reported as existing, but none showed the stronger activity indicators used by this toolkit: subscribers, state data, a nonzero change stamp, or a non-quiescent state. This distinction is important because permanent registry-backed WNF states may continue to report as existing without showing current activity.
+A complete live audit queried more than 250,000 members of the repeated system-scoped family while the server was in active use. The state names continued to report as existing, as expected for permanent registry-backed WNF states, but none showed the stronger activity indicators used by this toolkit: subscribers, state data, a nonzero change stamp, or a non-quiescent state. Native queries also completed without failures.
 
-In the retained seven-day AppXDeploymentServer event window, `Microsoft.Windows.Cortana` registration repeated about 141 times and `Microsoft.AAD.BrokerPlugin` about 140 times. Event 5401 reported `0x80070003` while AppContainer-profile creation failed; Events 300/401 reported `0x80073CF6`; Event 404 exposed the underlying internal `0x800705AA` insufficient-system-resources error. Related Events 603, 607, 854, 855, 10000, 10001, and 10002 showed repeated queuing, manifest processing, resiliency, and registration work. These are retained-window counts, not lifetime totals.
+At the same time, AppX and AppReadiness logs showed continuous registration failures affecting multiple built-in Windows components, including Cortana/SearchUI, AAD BrokerPlugin, and ShellExperienceHost. The recurring failure pattern included 0x80070003, 0x80073CF6, and underlying 0x800705AA insufficient-system-resource errors, along with repeated queuing, resiliency, and registration activity.
 
-Cross-server comparison also showed that value count alone is not a sufficient rule. The affected server reached 256,746 members of the repeated family with less than 24 hours of uptime. Two other RDS hosts using the same external access path had approximately 18,000 values after 16 days and approximately 66,000 after 37 days. A lightly used file server had 93 Notifications values, while two additional non-Gateway servers had none of the repeated 72-byte family. That pattern is correlation, not proof that RD Gateway or another specific component is the writer.
+Comparison with other servers reinforced that value count alone is not a cleanup rule. Systems with similar interactive workloads could contain substantial quantities of the same registration family without yet showing the same degree of failure, while servers without that workload contained little or none of it. Reboots also did not necessarily clear the accumulated registrations.
+
+For that reason, this toolkit does not define a universal healthy count and does not infer the creating process from the correlation. Cleanup is based on the exact target-family structure, live-state checks, supporting AppX symptoms, and administrator review rather than a numeric threshold.
 
 ## First check: profile package timeline
 
