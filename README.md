@@ -48,12 +48,10 @@ No single symptom or count is a universal indicator. The toolkit is intended to 
 | `Get-WnfNotificationValues.ps1` | Reads and exports a selected range of root-level `Notifications` values for inspection. | No |
 | `Find-WnfNotificationValuesOutsideReferenceFamily.ps1` | Identifies values outside the selected repeated reference family for further analysis. | No |
 | `Analyze-WnfUserScopePayloads.ps1` | Analyzes the 136-byte user-scoped WNF family and its user/AppContainer security-descriptor structure. | No |
-| `Audit-WnfSystemScopeLiveState.ps1` | Queries selected or all members of the repeated 72-byte system-scoped family for observable live-state evidence. | No |
+| `Audit-WnfSystemScopeLiveState.ps1` | Automatically locates an exact member of the confirmed 72-byte target family, then queries a sample or full scan for observable live-state evidence. | No |
 | `Get-AppXProfilePackageTimeline.ps1` | Builds a chronological inventory of per-profile AppX package-folder population and core package presence. | No |
 | `Collect-AppXReadinessAudit-Raw.ps1` | Collects detailed AppX, AppReadiness, shell, authentication, StateRepository, profile, service, and event-log evidence. | No |
 | `Collect-AppXReadinessAudit-Redacted.ps1` | Collects similar evidence with best-effort redaction of environment-specific identifiers. | No |
-| `Export-CortanaAppXEvents.ps1` | Exports AppX deployment events related to Cortana/SearchUI for focused analysis. | No |
-| `Export-AadBrokerPluginAppXEvents.ps1` | Exports AppX deployment events related to AAD BrokerPlugin for focused analysis. | No |
 | `Invoke-WnfNotificationsRemediation.ps1` | Audits by default. In confirmed cleanup mode, backs up the key, revalidates and live-checks each candidate, and deletes only exact qualifying matches. | Read-only by default; registry changes only in cleanup mode |
 
 ## Requirements
@@ -82,20 +80,17 @@ windows-wnf-registry-bloat-toolkit/
 ├── README.md
 ├── LICENSE
 ├── NOTICE
-├── .gitignore
-├── scripts/
+├── Scripts/
 │   ├── Analyze-WnfUserScopePayloads.ps1
 │   ├── Audit-WnfSystemScopeLiveState.ps1
 │   ├── Collect-AppXReadinessAudit-Raw.ps1
 │   ├── Collect-AppXReadinessAudit-Redacted.ps1
-│   ├── Export-AadBrokerPluginAppXEvents.ps1
-│   ├── Export-CortanaAppXEvents.ps1
 │   ├── Find-WnfNotificationValuesOutsideReferenceFamily.ps1
 │   ├── Get-AppXProfilePackageTimeline.ps1
 │   ├── Get-WnfNotificationsStructuralInventory.ps1
 │   ├── Get-WnfNotificationValues.ps1
 │   └── Invoke-WnfNotificationsRemediation.ps1
-└── docs/
+└── Docs/
     ├── investigation-overview.md
     ├── findings.md
     └── remediation.md
@@ -105,9 +100,9 @@ Do not publish production logs, registry exports, hive backups, user SIDs, serve
 
 ## Documentation
 
-- [Investigation overview](docs/investigation-overview.md) — signs and symptoms, how to determine whether a server may be affected, and the recommended diagnostic workflow.
-- [Technical findings](docs/findings.md) — WNF structures, live-state interpretation, AppX/AppContainer failure patterns, and preservation boundaries.
-- [Remediation procedure](docs/remediation.md) — audit, `-WhatIf`, maintenance-window cleanup, backup, validation, and recurrence monitoring.
+- [Investigation overview](Docs/investigation-overview.md) — signs and symptoms, how to determine whether a server may be affected, and the recommended diagnostic workflow.
+- [Technical findings](Docs/findings.md) — WNF structures, live-state interpretation, AppX/AppContainer failure patterns, and preservation boundaries.
+- [Remediation procedure](Docs/remediation.md) — audit, `-WhatIf`, maintenance-window cleanup, backup, validation, and recurrence monitoring.
 
 ## Quick start
 
@@ -116,13 +111,13 @@ Open an elevated **64-bit Windows PowerShell 5.1** window from the repository ro
 If the downloaded files are blocked:
 
 ```powershell
-Get-ChildItem .\scripts\*.ps1 | Unblock-File
+Get-ChildItem .\Scripts\*.ps1 | Unblock-File
 ```
 
 ### 1. Check the user-profile timeline
 
 ```powershell
-.\scripts\Get-AppXProfilePackageTimeline.ps1
+.\Scripts\Get-AppXProfilePackageTimeline.ps1
 ```
 
 This can reveal a chronological transition from normally populated AppX profiles to newer profiles with very few package folders or missing core package families.
@@ -132,7 +127,7 @@ Stale profile folders are retained in the report and identified separately so th
 ### 2. Inventory the Notifications key
 
 ```powershell
-.\scripts\Get-WnfNotificationsStructuralInventory.ps1
+.\Scripts\Get-WnfNotificationsStructuralInventory.ps1
 ```
 
 The inventory reports:
@@ -151,8 +146,10 @@ There is no universal safe value count. Compare the structure with the server's 
 ### 3. Run a live WNF sample
 
 ```powershell
-.\scripts\Audit-WnfSystemScopeLiveState.ps1
+.\Scripts\Audit-WnfSystemScopeLiveState.ps1
 ```
+
+When no `-ReferenceValueName` is supplied, the script automatically locates an exact current member of the toolkit's confirmed target family using the same fixed structural boundary documented below: `REG_BINARY`, decoded metadata `0x011`, 72-byte length, and the confirmed SHA-256 payload hash. The discovered value's complete payload is then used as the byte-for-byte reference for the live audit. An explicitly supplied `-ReferenceValueName` must match that same family.
 
 The audit checks for:
 
@@ -165,7 +162,7 @@ The audit checks for:
 After validating a sample, a full scan can be run:
 
 ```powershell
-.\scripts\Audit-WnfSystemScopeLiveState.ps1 -FullScan
+.\Scripts\Audit-WnfSystemScopeLiveState.ps1 -FullScan
 ```
 
 A complete scan of a heavily populated family may take several hours.
@@ -177,13 +174,13 @@ The absence of subscribers, state data, nonzero change stamps, and non-quiescent
 For full local diagnostic output:
 
 ```powershell
-.\scripts\Collect-AppXReadinessAudit-Raw.ps1
+.\Scripts\Collect-AppXReadinessAudit-Raw.ps1
 ```
 
 For best-effort redacted output:
 
 ```powershell
-.\scripts\Collect-AppXReadinessAudit-Redacted.ps1
+.\Scripts\Collect-AppXReadinessAudit-Redacted.ps1
 ```
 
 The collectors gather available evidence from AppReadiness, AppX deployment, AppModel Runtime, TWinUI, Search, shell, authentication, StateRepository, profile, Application, and System sources.
@@ -196,7 +193,7 @@ The collectors gather available evidence from AppReadiness, AppX deployment, App
 Audit is the default:
 
 ```powershell
-.\scripts\Invoke-WnfNotificationsRemediation.ps1
+.\Scripts\Invoke-WnfNotificationsRemediation.ps1
 ```
 
 The script performs an immediate structural inventory and exports its fixed candidate list without making registry changes.
@@ -204,7 +201,7 @@ The script performs an immediate structural inventory and exports its fixed cand
 ### 6. Simulate cleanup
 
 ```powershell
-.\scripts\Invoke-WnfNotificationsRemediation.ps1 `
+.\Scripts\Invoke-WnfNotificationsRemediation.ps1 `
     -Mode Cleanup `
     -WhatIf
 ```
@@ -232,7 +229,7 @@ Recommended maintenance sequence:
 Production command:
 
 ```powershell
-.\scripts\Invoke-WnfNotificationsRemediation.ps1 `
+.\Scripts\Invoke-WnfNotificationsRemediation.ps1 `
     -Mode Cleanup `
     -RollbackConfirmed `
     -MaintenanceWindowConfirmed
