@@ -6,51 +6,74 @@ PowerShell tools for identifying, analyzing, and carefully remediating excessive
 HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Notifications
 ```
 
-The toolkit was developed during an investigation of a Windows Server 2019 Remote Desktop Session Host experiencing severe registry-key growth, slow logons, high CPU usage, broad AppX/AppContainer registration failures, broken Start and taskbar Search, and Microsoft authentication/OneDrive failures.
+The toolkit is intended primarily for Windows Server 2019 systems showing a combination of unusually large `Notifications` registry data, AppX/AppContainer registration failures, broken per-user Windows features, slow logons, or resource-related errors.
+
+It grew out of an RDS investigation, but the read-only tools are designed to help administrators determine whether a different server shows the same structural and operational pattern before considering remediation.
 
 > [!CAUTION]
-> `Invoke-WnfNotificationsRemediation.ps1` performs low-level registry changes only when explicitly placed in cleanup mode. Its current target is one exact WNF value family established during the originating investigation. Review the source, complete the read-only audits, test with `-WhatIf`, maintain a verified rollback path, and use a controlled maintenance window before considering production cleanup.
+> The remediation script performs low-level registry changes only when explicitly placed in cleanup mode. Its target is intentionally narrow: one exact WNF value family established through structural analysis and live-state auditing. Review the source, complete the read-only checks, test with `-WhatIf`, maintain a verified rollback path, and use a controlled maintenance window before production cleanup.
 
 ## Project status
 
-This is an early operational toolkit based on a specific Windows Server 2019 investigation.
+This is an operational troubleshooting toolkit developed and tested primarily on Windows Server 2019.
 
-- Read-only collection and audit tools can be useful for broader comparison and troubleshooting.
-- The remediation logic is intentionally narrow and currently recognizes one exact 72-byte WNF family.
+- Most tools are read-only and can be used for comparison and diagnosis.
+- The remediation logic recognizes one exact 72-byte system-scoped WNF family.
 - The scripts have not been validated across every Windows version, RDS design, profile technology, or application stack.
 - WNF is a private Windows mechanism. Native WNF results are diagnostic evidence, not an official Microsoft stale-state determination.
-- A large `Notifications` key by itself is not sufficient evidence that this remediation applies.
+- A large `Notifications` key alone is not enough to justify cleanup.
 
-## Documentation
+## When this toolkit may be useful
 
-- [Investigation Overview](docs/investigation-overview.md) — symptoms, evidence collection, and how to determine whether a server resembles the originating case.
-- [Technical Findings](docs/findings.md) — WNF structures, live-state interpretation, AppX evidence, and cross-server observations.
-- [Remediation](docs/remediation.md) — audit, `-WhatIf`, maintenance-window cleanup, rollback, validation, and recurrence monitoring.
+A server may warrant investigation when several of these appear together:
+
+- Slow or inconsistent RDS logons.
+- High CPU activity associated with user sign-in or AppX processing.
+- Registry Editor becoming slow or unresponsive when opening the `Notifications` key.
+- Start menu or taskbar Search failures.
+- Microsoft authentication or OneDrive sign-in problems.
+- OneDrive Files On-Demand failing to initialize.
+- Newly created profiles with unusually few folders under `%LOCALAPPDATA%\Packages`.
+- Repeated AppX/AppReadiness failures across multiple users and packages.
+- Errors such as `0x800705AA`, `0x80070003`, `0x80073CF6`, or `0x800703FA`.
+- Very large quantities of one repeated WNF registration family that persist through reboot.
+
+No single symptom or count is a universal indicator. The toolkit is intended to combine registry structure, profile evidence, AppX events, live WNF state, and comparison-server data.
 
 ## Included tools
 
 | Script | Purpose | Changes the system |
-|---|---|---|
-| `Get-AppXProfilePackageTimeline.ps1` | Builds a chronological inventory of per-profile `%LOCALAPPDATA%\Packages` population and selected core AppX package families. | No |
-| `Get-WnfNotificationsStructuralInventory.ps1` | Counts and classifies root-level Notifications values, groups payload hashes, identifies the investigation-specific 72-byte family, and reports unique-ID sequence statistics. | No |
-| `Audit-WnfSystemScopeLiveState.ps1` | Queries a sample or the full repeated 72-byte family for state-name existence, subscribers, state data, change stamps, and quiescence. | No |
-| `Get-WnfNotificationValues.ps1` | Reads and exports a selected registry-enumeration range for low-level inspection. Enumeration order is not treated as age or importance. | No |
-| `Find-WnfNotificationValuesOutsideReferenceFamily.ps1` | Exports root-level values that do not exactly match a selected reference-family value for follow-up analysis. | No |
-| `Analyze-WnfUserScopePayloads.ps1` | Analyzes the observed 136-byte metadata-`0x091` user-scoped family, including security-descriptor/SID structure and payload grouping. | No |
-| `Collect-AppXReadinessAudit-Raw.ps1` | Collects unredacted AppX, AppReadiness, shell, authentication, StateRepository, profile, package, service, and event-log evidence. | No |
-| `Collect-AppXReadinessAudit-Redacted.ps1` | Collects similar evidence with best-effort redaction and post-export validation. | No |
-| `Invoke-WnfNotificationsRemediation.ps1` | Performs a structural audit by default. In confirmed cleanup mode, backs up the key, revalidates and live-checks every candidate, and deletes only exact matches with no observed live-state evidence. | Read-only by default; registry changes only in confirmed cleanup mode |
+| --- | --- | --- |
+| `Get-WnfNotificationsStructuralInventory.ps1` | Inventories and classifies the complete root-level `Notifications` key, including WNF metadata, payload groups, and sequence statistics. | No |
+| `Get-WnfNotificationValues.ps1` | Reads and exports a selected range of root-level `Notifications` values for inspection. | No |
+| `Find-WnfNotificationValuesOutsideReferenceFamily.ps1` | Identifies values outside the selected repeated reference family for further analysis. | No |
+| `Analyze-WnfUserScopePayloads.ps1` | Analyzes the 136-byte user-scoped WNF family and its user/AppContainer security-descriptor structure. | No |
+| `Audit-WnfSystemScopeLiveState.ps1` | Queries selected or all members of the repeated 72-byte system-scoped family for observable live-state evidence. | No |
+| `Get-AppXProfilePackageTimeline.ps1` | Builds a chronological inventory of per-profile AppX package-folder population and core package presence. | No |
+| `Collect-AppXReadinessAudit-Raw.ps1` | Collects detailed AppX, AppReadiness, shell, authentication, StateRepository, profile, service, and event-log evidence. | No |
+| `Collect-AppXReadinessAudit-Redacted.ps1` | Collects similar evidence with best-effort redaction of environment-specific identifiers. | No |
+| `Export-CortanaAppXEvents.ps1` | Exports AppX deployment events related to Cortana/SearchUI for focused analysis. | No |
+| `Export-AadBrokerPluginAppXEvents.ps1` | Exports AppX deployment events related to AAD BrokerPlugin for focused analysis. | No |
+| `Invoke-WnfNotificationsRemediation.ps1` | Audits by default. In confirmed cleanup mode, backs up the key, revalidates and live-checks each candidate, and deletes only exact qualifying matches. | Read-only by default; registry changes only in cleanup mode |
 
 ## Requirements
 
-- Windows Server 2019 is the currently investigated and tested platform.
+- Windows Server 2019 is the primary tested platform.
 - 64-bit Windows PowerShell 5.1.
-- Administrator rights for complete registry, package, service, and event-log access.
+- Administrator rights for complete registry, package, service, profile, and event-log access.
 - A local administrator and physical, hypervisor, or out-of-band console session for production cleanup.
-- Sufficient local storage for CSV output, event exports, and the registry backup.
+- Sufficient local storage for CSV output, event exports, and registry backup files.
 - A verified VM snapshot, image-level backup, or equivalent rollback method before cleanup.
 
-The scripts use built-in Windows and PowerShell functionality and require no third-party PowerShell modules. The toolkit contains no telemetry or diagnostic-upload functionality; generated output is written locally. Optional SID-to-account resolution in `Analyze-WnfUserScopePayloads.ps1 -ResolveSidNames` may use normal Windows/domain name-resolution services.
+The scripts use built-in Windows and PowerShell functionality. No third-party PowerShell modules are required.
+
+Generated output is written under:
+
+```text
+%ProgramData%\WindowsWnfRegistryBloatToolkit
+```
+
+unless a script-specific output path is supplied.
 
 ## Repository layout
 
@@ -65,185 +88,110 @@ windows-wnf-registry-bloat-toolkit/
 │   ├── Audit-WnfSystemScopeLiveState.ps1
 │   ├── Collect-AppXReadinessAudit-Raw.ps1
 │   ├── Collect-AppXReadinessAudit-Redacted.ps1
+│   ├── Export-AadBrokerPluginAppXEvents.ps1
+│   ├── Export-CortanaAppXEvents.ps1
 │   ├── Find-WnfNotificationValuesOutsideReferenceFamily.ps1
 │   ├── Get-AppXProfilePackageTimeline.ps1
-│   ├── Get-WnfNotificationValues.ps1
 │   ├── Get-WnfNotificationsStructuralInventory.ps1
+│   ├── Get-WnfNotificationValues.ps1
 │   └── Invoke-WnfNotificationsRemediation.ps1
 └── docs/
-    ├── findings.md
     ├── investigation-overview.md
+    ├── findings.md
     └── remediation.md
 ```
 
-Do not publish production logs, registry exports, hive backups, user SIDs, server names, tenant identifiers, or unreviewed event data in the repository.
+Do not publish production logs, registry exports, hive backups, user SIDs, server names, tenant identifiers, or unreviewed event data.
+
+## Documentation
+
+- [Investigation overview](docs/investigation-overview.md) — signs and symptoms, how to determine whether a server may be affected, and the recommended diagnostic workflow.
+- [Technical findings](docs/findings.md) — WNF structures, live-state interpretation, AppX/AppContainer failure patterns, and preservation boundaries.
+- [Remediation procedure](docs/remediation.md) — audit, `-WhatIf`, maintenance-window cleanup, backup, validation, and recurrence monitoring.
 
 ## Quick start
 
-Open an elevated **64-bit Windows PowerShell 5.1** window from the repository root. If the ZIP or scripts were downloaded from the Internet, remove the downloaded-file zone marker before running them:
+Open an elevated **64-bit Windows PowerShell 5.1** window from the repository root.
+
+If the downloaded files are blocked:
 
 ```powershell
-Get-ChildItem .\scripts\*.ps1 |
-    Unblock-File
+Get-ChildItem .\scripts\*.ps1 | Unblock-File
 ```
 
-Run scripts in accordance with your organization's PowerShell execution-policy requirements. If a process-scoped execution-policy override is permitted and required for testing, apply it deliberately rather than changing machine-wide policy.
-
-### 1. Check the profile package timeline
+### 1. Check the user-profile timeline
 
 ```powershell
 .\scripts\Get-AppXProfilePackageTimeline.ps1
 ```
 
-Default CSV:
+This can reveal a chronological transition from normally populated AppX profiles to newer profiles with very few package folders or missing core package families.
 
-```text
-%ProgramData%\WindowsWnfRegistryBloatToolkit\ProfileTimeline\AppX-ProfilePackageTimeline-<timestamp>.csv
-```
-
-Look for a chronological transition where newer **registered** profiles suddenly have sparse `%LOCALAPPDATA%\Packages` trees or are missing core package families such as Cortana/SearchUI, AAD BrokerPlugin, ShellExperienceHost, and CloudExperienceHost.
+Stale profile folders are retained in the report and identified separately so they can be excluded from timeline interpretation without losing the evidence.
 
 ### 2. Inventory the Notifications key
 
 ```powershell
-.\scripts\Get-WnfNotificationsStructuralInventory.ps1 `
-    -ServerLabel 'RDS-Comparison-01'
+.\scripts\Get-WnfNotificationsStructuralInventory.ps1
 ```
 
-Default output directory:
-
-```text
-%ProgramData%\WindowsWnfRegistryBloatToolkit\StructuralInventory
-```
-
-The script reports:
+The inventory reports:
 
 - Total root-level values.
 - `SequenceNumber`.
-- 72-byte, metadata-`0x011` system-scoped values.
-- 136-byte, metadata-`0x091` user-scoped values.
+- 72-byte metadata-`0x011` system-scoped values.
+- 136-byte metadata-`0x091` user-scoped values.
 - Other root values.
 - Distinct SHA-256 payload groups.
-- Matches to the known investigation payload.
+- Matches to the toolkit's reference payload.
 - Unique-ID ranges, gaps, duplicates, and contiguous runs.
 
-This is the preferred first registry step when comparing affected and unaffected systems.
+There is no universal safe value count. Compare the structure with the server's symptoms and, when possible, with similar systems.
 
 ### 3. Run a live WNF sample
 
 ```powershell
-.\scripts\Audit-WnfSystemScopeLiveState.ps1 `
-    -AuditLabel 'Baseline'
+.\scripts\Audit-WnfSystemScopeLiveState.ps1
 ```
 
-Default output directory:
+The audit checks for:
 
-```text
-%ProgramData%\WindowsWnfRegistryBloatToolkit\LiveAudit
-```
-
-The default run audits a distributed sample of 1,000 values. It records:
-
-- Whether the live WNF namespace reports the state name as existing.
-- Whether subscribers are present.
-- Whether the state is quiescent.
-- Whether state data is present and its size.
+- Native WNF query success.
+- Subscribers.
+- Quiescence.
+- State data.
 - Change stamp.
-- Native query status.
-- State-data hash when readable.
 
-Recheck the exact same names later by supplying a CSV generated by a previous audit:
+After validating a sample, a full scan can be run:
 
 ```powershell
-.\scripts\Audit-WnfSystemScopeLiveState.ps1 `
-    -ReuseNamesFromCsv 'C:\Path\To\previous-audit.csv' `
-    -AuditLabel 'AfterReboot'
+.\scripts\Audit-WnfSystemScopeLiveState.ps1 -FullScan
 ```
 
-Run the complete family only after validating the sample:
+A complete scan of a heavily populated family may take several hours.
+
+The absence of subscribers, state data, nonzero change stamps, and non-quiescent states is strong evidence that the states were dormant during the scan. It is not an absolute guarantee of future non-use.
+
+### 4. Collect AppX and AppReadiness evidence
+
+For full local diagnostic output:
 
 ```powershell
-.\scripts\Audit-WnfSystemScopeLiveState.ps1 `
-    -FullScan `
-    -AuditLabel 'FullScan-UsersActive'
+.\scripts\Collect-AppXReadinessAudit-Raw.ps1
 ```
 
-A complete scan of a heavily populated key may take several hours.
-
-### 4. Collect related AppX and AppReadiness evidence
-
-For output intended to be reviewed or shared more broadly, start with the best-effort redacted collector:
+For best-effort redacted output:
 
 ```powershell
-.\scripts\Collect-AppXReadinessAudit-Redacted.ps1 `
-    -Days 7
+.\scripts\Collect-AppXReadinessAudit-Redacted.ps1
 ```
 
-Default output:
-
-```text
-%ProgramData%\WindowsWnfRegistryBloatToolkit\AppX-Readiness-Audit-Redacted-<timestamp>
-```
-
-For local operational troubleshooting when unredacted identifiers are required:
-
-```powershell
-.\scripts\Collect-AppXReadinessAudit-Raw.ps1 `
-    -Days 7
-```
-
-Default output:
-
-```text
-%ProgramData%\WindowsWnfRegistryBloatToolkit\AppX-Readiness-Audit-Raw-<timestamp>
-```
-
-The collectors include available data from AppReadiness, AppXDeployment/AppXDeploymentServer, AppModel Runtime/State, TWinUI, shell/Search, State Repository, Microsoft AAD/WebAuth, Cloud Experience Host, User Profile Service, Application/System logs, service/package state, per-profile package counts, AppRepository resiliency files, and event-log retention information.
+The collectors gather available evidence from AppReadiness, AppX deployment, AppModel Runtime, TWinUI, Search, shell, authentication, StateRepository, profile, Application, and System sources.
 
 > [!IMPORTANT]
-> The raw collector is intentionally unredacted and should be treated as sensitive. Redaction in the redacted collector is best-effort; event messages are free-form, so review all generated files before external or public sharing.
+> Redaction is best-effort. Event messages are free-form, and no automated process can guarantee that every environment-specific identifier was removed. Review generated output before sharing it outside the intended administrative team.
 
-### 5. Optional deeper structural analysis
-
-These read-only tools are useful after the initial structural inventory:
-
-```powershell
-.\scripts\Get-WnfNotificationValues.ps1 -Count 100
-```
-
-Default CSV path is under:
-
-```text
-%ProgramData%\WindowsWnfRegistryBloatToolkit\Samples
-```
-
-To export values outside a selected repeated reference family:
-
-```powershell
-.\scripts\Find-WnfNotificationValuesOutsideReferenceFamily.ps1
-```
-
-Default CSV:
-
-```text
-%ProgramData%\WindowsWnfRegistryBloatToolkit\Analysis\Wnf-NotificationValues-OutsideReferenceFamily.csv
-```
-
-To analyze the 136-byte user-scoped family from that export:
-
-```powershell
-.\scripts\Analyze-WnfUserScopePayloads.ps1
-```
-
-Default output directory:
-
-```text
-%ProgramData%\WindowsWnfRegistryBloatToolkit\Analysis\WnfUserScope
-```
-
-Use `-ResolveSidNames` only when account-name resolution is useful and appropriate for the environment.
-
-### 6. Run the remediation script in read-only Audit mode
+### 5. Run the remediation script in read-only mode
 
 Audit is the default:
 
@@ -251,15 +199,9 @@ Audit is the default:
 .\scripts\Invoke-WnfNotificationsRemediation.ps1
 ```
 
-The script performs an immediate structural inventory and exports the exact candidate list without making registry changes.
+The script performs an immediate structural inventory and exports its fixed candidate list without making registry changes.
 
-Default output:
-
-```text
-%ProgramData%\WindowsWnfRegistryBloatToolkit\Wnf-Remediation-Audit-<timestamp>
-```
-
-### 7. Simulate the complete cleanup
+### 6. Simulate cleanup
 
 ```powershell
 .\scripts\Invoke-WnfNotificationsRemediation.ps1 `
@@ -267,34 +209,14 @@ Default output:
     -WhatIf
 ```
 
-The simulation:
+The simulation performs the same per-candidate structural and live-state checks used by actual cleanup, but records qualifying values as `WouldDelete` instead of removing them.
 
-- Performs the same immediate structural inventory used by cleanup.
-- Re-reads and revalidates every candidate.
-- Performs the same live WNF checks used by cleanup.
-- Records qualifying values as `WouldDelete`.
-- Does not save the registry key.
-- Does not delete values.
-
-Because it checks each value individually, the simulation may take several hours.
-
-Previously approved counts can be supplied as optional additional guards:
-
-```powershell
-.\scripts\Invoke-WnfNotificationsRemediation.ps1 `
-    -Mode Cleanup `
-    -ExpectedCandidateCount 256746 `
-    -ExpectedUserScopedCount 4277 `
-    -ExpectedTotalRootValues 261024 `
-    -WhatIf
-```
-
-The cleanup run's immediate internal inventory remains authoritative. External counts are optional safeguards, not a mandatory prerequisite.
+For a large candidate family, this can take several hours.
 
 ## Production cleanup
 
 > [!WARNING]
-> Do not use these commands until the read-only output has been reviewed and a tested rollback path is available.
+> Do not run cleanup until the read-only evidence has been reviewed and a verified rollback path is available.
 
 Recommended maintenance sequence:
 
@@ -304,8 +226,8 @@ Recommended maintenance sequence:
 4. Sign in through the physical, hypervisor, or out-of-band console with a local administrator.
 5. Verify the VM snapshot or image-level rollback.
 6. Run cleanup mode.
-7. Reboot immediately after successful cleanup.
-8. Validate the server before restoring Gateway/RDS user access.
+7. Reboot after successful cleanup.
+8. Validate the server before restoring normal RDS/Gateway access.
 
 Production command:
 
@@ -316,47 +238,38 @@ Production command:
     -MaintenanceWindowConfirmed
 ```
 
-PowerShell presents a final high-impact confirmation before deletion.
+The script performs another immediate structural inventory and presents a high-impact confirmation before deletion.
 
-### Cleanup safeguards
+### Automatic backup and safeguards
 
-Before deleting anything, the script:
+Before actual deletion, the script:
 
 - Requires elevation.
 - Requires a local account and console session by default.
 - Requires explicit maintenance-window and rollback acknowledgements.
-- Performs its own complete structural inventory.
-- Writes the pre-cleanup summary and fixed candidate list.
-- Refuses cleanup if structural safeguards fail.
-- Saves the complete Notifications key with `reg save`.
-- Verifies that the backup exists and is not empty.
+- Performs its own current structural inventory.
+- Captures a fixed pre-cleanup candidate list.
+- Saves the complete `Notifications` key with `reg save`.
+- Verifies that the backup exists and is non-empty.
 - Records the backup SHA-256 hash.
-- Separately exports `Notifications\Data` when available.
+- Attempts a separate export of `Notifications\Data`.
 
-For every candidate, the script immediately rechecks:
+For every candidate, it immediately rechecks:
 
 - 16-character hexadecimal value name.
 - `REG_BINARY` type.
-- Decoded WNF metadata `0x011`.
+- WNF metadata `0x011`.
 - Data length of exactly 72 bytes.
-- Complete payload SHA-256 hash.
+- Exact reference payload hash.
 - Native query success.
 - Subscriber state.
 - State-data size.
 - Change stamp.
 - Quiescent state.
 
-The value is preserved when:
+A candidate is preserved if its structure changes, a native query fails, observable live-state evidence appears, or deletion fails.
 
-- It no longer matches the exact target.
-- A native WNF query fails.
-- Subscribers are present.
-- State data is present.
-- The change stamp is nonzero.
-- `IsQuiescent` is `False`.
-- Registry deletion fails.
-
-The script does not rely on a delete failure to determine whether a state is in use.
+The script does not rely on deletion failure to determine whether a state is in use.
 
 ### Explicitly preserved
 
@@ -366,15 +279,15 @@ Cleanup does not target:
 - Any subkey.
 - `Notifications\Data`.
 - `SequenceNumber`.
-- The 136-byte, metadata-`0x091` user/AppContainer family.
+- The 136-byte metadata-`0x091` user/AppContainer family.
 - Any root value with a different type, length, metadata, or payload.
 - Values created after the fixed candidate list was captured.
 
 The script does not reboot automatically.
 
-## Investigation-specific target
+## Remediation target
 
-The current remediation script is intentionally tied to the family established during the originating investigation:
+The current cleanup logic intentionally recognizes the family established during the original investigation:
 
 ```text
 Registry path:
@@ -393,97 +306,85 @@ Payload SHA-256:
 A847320A34E3ABD0F790D27CEF46D52CDD81E7B0F5257E8BE74FEF8FEE788840
 ```
 
-Do not change the hash or broaden the filter merely to make another server produce candidates. A different payload or structure requires a separate analysis.
+The exact hash is part of the remediation safety boundary, not a general Windows WNF signature.
 
-The 136-byte metadata-`0x091` family observed in the investigation contained structured per-user/AppContainer security descriptors and is deliberately preserved.
+Do not change the hash or broaden the filter merely to make another server produce candidates. A different payload or structure requires separate analysis.
 
-## Originating case study
+The 136-byte metadata-`0x091` family observed during analysis contained structured per-user/AppContainer security descriptors and is deliberately preserved.
 
-The toolkit originated from a Windows Server 2019 RDS investigation with:
+## Origin of the toolkit
 
-- 261,024 root values under the Notifications key.
-- 256,746 exact members of the repeated 72-byte family.
-- 4,277 members of a distinct 136-byte user/AppContainer family.
-- One `SequenceNumber`.
-- Regedit becoming unresponsive and CPU usage spiking when the key was opened.
+The project grew out of a Windows Server 2019 RDS investigation where the `Notifications` key had grown to roughly **260,000** root values, with **more than 250,000** belonging to one repeated 72-byte system-scoped family.
+
+The same server showed:
+
+- Registry Editor becoming unresponsive when opening the key.
 - Slow logons and periods of high CPU.
 - Broken Start and taskbar Search.
-- OneDrive authentication and Files On-Demand failures.
-- New profiles with nearly empty `%LOCALAPPDATA%\Packages` folders.
-- Repeated Cortana and AAD BrokerPlugin AppX registration loops.
+- Microsoft/OneDrive authentication and Files On-Demand problems.
+- Newer profiles with nearly empty `%LOCALAPPDATA%\Packages` trees.
+- Repeated AppX/AppReadiness failures involving built-in shell and authentication packages.
+- Resource and package-registration errors including `0x800705AA`.
 
-A full live audit of all 256,746 target values while users were active found:
+A complete live scan of **more than 250,000** matching values found no subscribers, state data, nonzero change stamps, non-quiescent states, or native-query failures during the scan.
 
-```text
-Selected/read successfully:       256746
-Exact family matches:             256746
-Strong live evidence:                  0
-Exists, no strong live evidence:  256746
-Subscribers present:                   0
-State data present:                    0
-Nonzero change stamps:                 0
-Not quiescent:                         0
-Native query failures:                 0
-```
+Comparison systems in the same environment helped show that the repeated family was associated with the interactive RDS workload, but those comparisons did not establish a universal healthy count or identify the creating process.
 
-The distinction between `Strong live evidence` and `Exists, no strong live evidence` is important: permanent registry-backed state names can report as existing even when no subscribers, state data, nonzero change stamp, or non-quiescent condition is observed.
-
-In the retained seven-day AppXDeploymentServer event window, `Microsoft.Windows.Cortana` registration cycled about 141 times and `Microsoft.AAD.BrokerPlugin` about 140 times. In those repeated sequences, Event 5401 reported `0x80070003` while Windows was unable to create the AppContainer profile; Events 300/401 reported package-registration failure `0x80073CF6`; and Event 404 exposed the underlying internal `0x800705AA` insufficient-system-resources error. Events 603, 607, 854, 855, 10000, 10001, and 10002 showed repeated queuing, manifest processing, resiliency, and related registration activity. These are retained-window observations, not lifetime totals.
-
-Cross-server comparison showed that the affected host reached 256,746 members of the repeated family despite less than 24 hours of uptime. Two other RDS hosts using the same external access path had approximately 18,000 values after 16 days of uptime and approximately 66,000 after 37 days. A lightly used file server had 93 Notifications values, and two additional non-Gateway servers had none of the repeated 72-byte family. This is an environment-level correlation, not a universal threshold and not proof that RD Gateway or any other component created the values.
+The project documentation intentionally focuses on the repeatable diagnostic pattern rather than treating those originating counts as thresholds.
 
 ## Post-cleanup validation
 
-Before returning the server to production, verify:
+Before returning a server to normal production use, verify:
 
-- The Notifications key opens without Regedit hanging or causing an abnormal CPU spike.
+- The `Notifications` key opens without Registry Editor hanging or causing an abnormal CPU spike.
 - Start works.
 - Taskbar Search works.
 - Settings and ShellExperienceHost activate normally.
-- A new test profile receives a normally populated package tree.
-- Cortana/SearchUI no longer loops through AppX registration failures.
-- AAD BrokerPlugin registers and activates normally.
+- A new test profile receives an appropriately populated package tree.
+- Cortana/SearchUI and AAD BrokerPlugin register and activate normally.
 - Microsoft/OneDrive authentication works.
-- OneDrive Files On-Demand initializes and operates normally.
-- AppXDeploymentServer no longer produces the same rapid registration-failure loop.
-- AppReadiness completes instead of continuously retrying.
-- StateRepository lock/retry events return to normal levels.
+- OneDrive Files On-Demand works.
+- AppX/AppReadiness registration loops stop.
+- StateRepository lock/retry activity returns to normal background levels.
 - Known Scheduled Tasks execute normally.
-- Server Manager functions normally.
+- Server Manager remains functional.
 - RDS logon time and CPU behavior improve.
 
-Record Notifications counts:
+Monitor the Notifications structure after cleanup, reboot, controlled user logons, and during the initial production period.
 
-- Before cleanup.
-- Immediately after deletion.
-- After reboot.
-- After controlled local-administrator logons.
-- After controlled Gateway/RDS user logon and logoff cycles.
-- Daily during the initial monitoring period.
-
-Cleanup addresses accumulated state. It may not identify or permanently stop the process that created it.
+Cleanup removes accumulated state. It may not identify or permanently stop the process that created it.
 
 ## What this project does not do
 
 - It does not define a universal safe maximum number of registry values.
-- It does not assume that keeping 500 or 5,000 values is a Windows-supported baseline.
-- It does not delete and recreate the complete Notifications key.
+- It does not assume that keeping an arbitrary number of values is a Windows-supported baseline.
+- It does not delete and recreate the complete `Notifications` key.
 - It does not delete the `Data` subkey.
 - It does not modify WindowsApps permissions.
 - It does not disable AppReadiness, SystemEventsBroker, or BrokerInfrastructure.
 - It does not run Microsoft's historical `wnfcleanup.exe`.
 - It does not include or wrap the community `clnotifications` executable.
 - It does not identify the process that originally created each WNF state.
-- It does not guarantee that the originating leak will not recur.
+- It does not guarantee that the originating accumulation will not recur.
 - It does not replace normal backup, change-control, incident-management, or vendor-support decisions.
 
 ## Data handling
 
-Treat all collected output as operationally sensitive.
+Treat collected output as operationally sensitive.
 
-The remediation output records system, account, session, registry, and backup information. Structural and live-audit output includes WNF state names and hashes. The raw AppX collector intentionally retains environment-specific information. The redacted collector reduces identifiable information on a best-effort basis but still requires manual review before publication or external sharing.
+The remediation output can contain system, account, session, registry, and backup information. Structural and live-audit output includes WNF state names and hashes. Redacted AppX output should still be manually reviewed before publication or external sharing.
 
-The included `.gitignore` excludes common diagnostic and backup artifacts, including hive saves, registry exports, event-log exports, generated CSVs, diagnostic archives, and toolkit output directories. Review staged files before every public commit; `.gitignore` is not a substitute for that review.
+Do not commit production diagnostic output such as:
+
+```text
+*.hiv
+*.reg
+*.evtx
+production CSV exports
+production ZIP archives
+server-specific handoff documents
+screenshots containing server or account information
+```
 
 ## Related work and references
 
@@ -491,45 +392,37 @@ The included `.gitignore` excludes common diagnostic and backup artifacts, inclu
 
 - [Registry bloat causes slow logons or insufficient system resources error 0x800705AA in Windows 8.1 — KB3063843](https://support.microsoft.com/en-us/topic/registry-bloat-causes-slow-logons-or-insufficient-system-resources-error-0x800705aa-in-windows-8-1-82a985fb-df27-abda-440b-f3f81a2c949d)
 - [Troubleshooting packaging, deployment, and query of Windows apps](https://learn.microsoft.com/en-us/windows/win32/appxpkg/troubleshooting)
+- [Fix problems in Windows Search](https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/fix-problems-in-windows-search)
 - [Issues with AppX, MSIX, or Microsoft Store applications — FSLogix](https://learn.microsoft.com/en-us/fslogix/troubleshooting-appx-issues)
-- [Fix problems in Windows Search](https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/fix-problems-in-windows-search) — Windows client/Search background; not a Server 2019 WNF-remediation reference.
 
-KB3063843 documents WNF registration leakage under the same Notifications path and an associated cleanup utility for Windows 8.1 and Windows Server 2012 R2. It is relevant historical evidence for the registry path and symptom pattern, but it does not establish that the older utility is supported on Windows Server 2019.
+Microsoft KB3063843 documents a WNF registration leak in the same registry area and a matching slow-logon/high-CPU/`0x800705AA` symptom pattern on Windows 8.1 and Windows Server 2012 R2. It is useful historical precedent, but it does not establish that its cleanup utility is supported on Windows Server 2019.
 
 ### Community investigations
 
-- [Windows Server AppX Installation Failures — Joel Leach](https://www.joelleach.net/2024/12/30/windows-server-appx-installation-failures/)
+- [Windows Server AppX Installation Failures — Joel Leach](https://joelleach.net/2024/12/30/windows-server-appx-installation-failures/)
 - [Lazy-256/clnotifications](https://github.com/Lazy-256/clnotifications)
 
-The community sources helped identify similar Server 2019 symptoms and prior cleanup approaches. This toolkit uses its own structural classification, live-state auditing, backup, dry-run, and per-value safety checks rather than treating an arbitrary retained-value count as a Windows-defined baseline.
+These community sources document similar Server 2019 behavior and prior cleanup approaches. This toolkit uses structural classification, live-state auditing, backup, dry-run, and per-value safety checks rather than an arbitrary retained-value threshold.
 
 ## Contributing
 
 Issues and pull requests are welcome, especially for:
 
 - Read-only testing on additional Windows Server versions.
+- Additional anonymized comparison results.
 - Safer output and redaction.
-- Improved offline-hive analysis.
+- Improved profile-timeline analysis.
 - Better post-remediation monitoring.
 - Additional native-query validation.
 - Documentation corrections.
-- Reproducible, anonymized comparison results.
 
 Do not submit production registry exports or logs containing identifiable information.
 
-Changes to remediation filters should include:
-
-- A documented structural basis.
-- Read-only evidence.
-- Test results.
-- Failure-mode analysis.
-- Preservation rules.
-- A dry-run path.
-- Rollback considerations.
+Changes to remediation filters should include a documented structural basis, read-only evidence, test results, preservation rules, a dry-run path, and rollback considerations.
 
 ## Security and responsible use
 
-Do not publish exploitable environment details or sensitive diagnostic output in a public issue. Use a private communication channel for security-sensitive reports.
+Do not publish sensitive diagnostic output or environment details in a public issue.
 
 The tools are intended for authorized administration of systems you own or manage.
 
