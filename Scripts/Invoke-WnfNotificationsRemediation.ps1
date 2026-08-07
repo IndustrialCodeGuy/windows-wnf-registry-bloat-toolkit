@@ -47,7 +47,8 @@
     Previously approved counts may be supplied as optional additional guards.
     The -WhatIf cleanup simulation does not save the registry key or delete
     values and may take several hours because it performs the same per-value
-    live WNF checks used by an actual cleanup.
+    live WNF checks used by an actual cleanup. Diagnostic run logs and CSV
+    output are still written during -WhatIf so the simulation can be reviewed.
 
 .NOTES
     Run from elevated 64-bit Windows PowerShell 5.1 on Windows Server 2019.
@@ -236,7 +237,7 @@ $SafeMode = $Mode -replace '[^A-Za-z0-9._-]', '_'
 $Timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $OutputDirectory = Join-Path $OutputRoot "Wnf-Remediation-$SafeMode-$Timestamp"
 
-New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+New-Item -ItemType Directory -Path $OutputDirectory -Force -WhatIf:$false | Out-Null
 
 $RunLogPath = Join-Path $OutputDirectory 'Run.log'
 $PreSummaryPath = Join-Path $OutputDirectory 'PreCleanup-StructuralSummary.csv'
@@ -263,7 +264,7 @@ function Write-RunLog {
         $Level,
         $Message
 
-    Add-Content -LiteralPath $RunLogPath -Value $Line -Encoding UTF8
+    Add-Content -LiteralPath $RunLogPath -Value $Line -Encoding UTF8 -WhatIf:$false
 
     switch ($Level) {
         'WARN'  { Write-Warning $Message }
@@ -939,7 +940,7 @@ function New-NotificationsRegistryBackup {
         $LASTEXITCODE
 
     $SaveOutput |
-        Out-File -LiteralPath $HiveBackupLog -Encoding UTF8
+        Out-File -LiteralPath $HiveBackupLog -Encoding UTF8 -WhatIf:$false
 
     if ($SaveExitCode -ne 0) {
         throw (
@@ -981,7 +982,7 @@ function New-NotificationsRegistryBackup {
             $LASTEXITCODE
 
         $ExportOutput |
-            Out-File -LiteralPath $DataExportLog -Encoding UTF8
+            Out-File -LiteralPath $DataExportLog -Encoding UTF8 -WhatIf:$false
 
         if (
             $ExportExitCode -eq 0 -and
@@ -1028,7 +1029,7 @@ function New-NotificationsRegistryBackup {
     $Manifest |
         Export-Csv -LiteralPath (
             Join-Path $OutputDirectory 'Backup-Manifest.csv'
-        ) -NoTypeInformation -Encoding UTF8
+        ) -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
     Write-RunLog (
         "Registry backup verified: " +
@@ -1092,7 +1093,7 @@ function Invoke-TargetCandidateEvaluation {
 
         if (-not $script:ActionCsvInitialized) {
             $Batch |
-                Export-Csv -LiteralPath $ActionLogPath -NoTypeInformation -Encoding UTF8
+                Export-Csv -LiteralPath $ActionLogPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
             $script:ActionCsvInitialized = $true
             $script:ActionCsvPath =
@@ -1101,7 +1102,7 @@ function Invoke-TargetCandidateEvaluation {
         else {
             $Batch |
                 Export-Csv -LiteralPath $ActionLogPath -NoTypeInformation -Encoding UTF8 `
-                    -Append
+                    -Append -WhatIf:$false
         }
 
         $script:ActionCsvInitialized = $true
@@ -1615,13 +1616,15 @@ try {
     & quser.exe 2>&1 |
         Out-File `
             -LiteralPath $SessionSnapshotPath `
-            -Encoding UTF8
+            -Encoding UTF8 `
+            -WhatIf:$false
 }
 catch {
     "Could not collect quser output: $($_.Exception.Message)" |
         Out-File `
             -LiteralPath $SessionSnapshotPath `
-            -Encoding UTF8
+            -Encoding UTF8 `
+            -WhatIf:$false
 }
 
 
@@ -1636,10 +1639,10 @@ $PreInventory =
         -Label 'PreCleanup'
 
 $PreInventory.Summary |
-    Export-Csv -LiteralPath $PreSummaryPath -NoTypeInformation -Encoding UTF8
+    Export-Csv -LiteralPath $PreSummaryPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
 $PreInventory.Candidates |
-    Export-Csv -LiteralPath $CandidateListPath -NoTypeInformation -Encoding UTF8
+    Export-Csv -LiteralPath $CandidateListPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
 $CandidateListHash =
     (Get-FileHash `
@@ -1875,7 +1878,7 @@ $CleanupResult =
         -OperationLabel $OperationLabel
 
 $CleanupResult |
-    Export-Csv -LiteralPath $CleanupSummaryPath -NoTypeInformation -Encoding UTF8
+    Export-Csv -LiteralPath $CleanupSummaryPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
 Write-RunLog (
     'Candidate evaluation completed. ' +
@@ -1908,10 +1911,10 @@ if ($PerformDeletion) {
             -Label 'PostCleanup'
 
     $PostInventory.Summary |
-        Export-Csv -LiteralPath $PostSummaryPath -NoTypeInformation -Encoding UTF8
+        Export-Csv -LiteralPath $PostSummaryPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
     $PostInventory.Candidates |
-        Export-Csv -LiteralPath $PostCandidatesPath -NoTypeInformation -Encoding UTF8
+        Export-Csv -LiteralPath $PostCandidatesPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
     Write-RunLog (
         'Post-cleanup inventory completed. ' +
