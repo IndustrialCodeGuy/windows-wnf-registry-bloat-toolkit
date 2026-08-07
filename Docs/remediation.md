@@ -128,7 +128,7 @@ Before actual cleanup:
 9. Reboot the server.
 10. Sign in through the console using the local administrator.
 
-Do not perform the production cleanup through RD Gateway or from a normal RDS user session.
+Based on the observed correlation between the repeated WNF family and Gateway-mediated RDS user sessions, it is advisable to perform cleanup with Gateway users disconnected and to avoid using a Gateway session for the maintenance work. A direct local console, hypervisor console, or out-of-band management session is preferred. A direct RDP session that does not traverse the Gateway may be lower risk, but this was not specifically validated during the investigation, so a local or console-based administrative session remains the recommended option.
 
 This is a precaution intended to minimize session-related activity while the key is being modified. It does not prove that RD Gateway itself is the writer.
 
