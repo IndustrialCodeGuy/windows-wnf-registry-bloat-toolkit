@@ -123,10 +123,11 @@ Before actual cleanup:
 4. Create and verify a VM snapshot, image-level backup, or equivalent rollback method.
 5. Retain relevant AppX/AppReadiness event logs and current diagnostic output.
 6. Record known pre-existing failures such as Start, Search, OneDrive, Files On-Demand, or slow logons.
-7. Disable new RDS logons.
-8. Log off ordinary users.
+7. Disable new RDS logons and ensure Gateway-mediated user sessions are disconnected.
+8. Log off ordinary user sessions.
 9. Reboot the server.
-10. Sign in through the console using the local administrator.
+10. After reboot, preferably sign in through the physical, hypervisor, or
+    out-of-band console with a local administrator account.
 
 Based on the observed correlation between the repeated WNF family and Gateway-mediated RDS user sessions, it is advisable to perform cleanup with Gateway users disconnected and to avoid using a Gateway session for the maintenance work. A direct local console, hypervisor console, or out-of-band management session is preferred. A direct RDP session that does not traverse the Gateway may be lower risk, but this was not specifically validated during the investigation, so a local or console-based administrative session remains the recommended option.
 
