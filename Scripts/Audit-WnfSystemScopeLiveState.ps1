@@ -14,6 +14,13 @@
     observed 72-byte WNF family by name metadata, registry type, and length,
     and audits a distributed sample of 1,000 values by default.
 
+    When -ReferenceValueName is omitted, the script automatically locates an
+    exact member of the toolkit's confirmed target family by REG_BINARY type,
+    decoded metadata 0x011, 72-byte length, and the fixed SHA-256 payload hash.
+    That value's complete payload becomes the byte-for-byte reference for the
+    audit. An explicitly supplied -ReferenceValueName must match the same fixed
+    family boundary.
+
     Each selected value is re-read and compared with the reference payload,
     then queried through read-only native WNF routines for state-name
     existence, subscribers, quiescence, state-data size and status, change
@@ -35,7 +42,9 @@
 
 [CmdletBinding()]
 param(
-    [string] $ReferenceValueName = '41C64E6DA0000065',
+    # Optional exact member of the confirmed toolkit family. When omitted,
+    # the script discovers one automatically from the current registry data.
+    [string] $ReferenceValueName,
 
     [ValidateRange(3, 1000000)]
     [int] $SampleCount = 1000,
@@ -78,6 +87,13 @@ $RegistryDisplayPath =
         '41C64E6DA3BC0074',
         [Globalization.NumberStyles]::HexNumber
     )
+
+# Fixed, investigation-specific family boundary. Keep these values aligned
+# with Invoke-WnfNotificationsRemediation.ps1.
+[uint64] $TargetMetadata = 0x011
+[int] $TargetLength = 72
+$TargetPayloadHash =
+    'A847320A34E3ABD0F790D27CEF46D52CDD81E7B0F5257E8BE74FEF8FEE788840'
 
 [uint32] $StatusSuccess = 0
 [uint32] $NtFailureMask =
@@ -275,6 +291,218 @@ function Test-ByteArrayEqual {
     }
 
     return $true
+}
+
+
+function Test-WnfToolkitFamilyValue {
+    param(
+        [Parameter(Mandatory)]
+        [Microsoft.Win32.RegistryKey] $RegistryKey,
+
+        [Parameter(Mandatory)]
+        [string] $ValueName
+    )
+
+    if ($ValueName -notmatch '^[0-9A-Fa-f]{16}$') {
+        return [pscustomobject]@{
+            Match    = $false
+            Reason   = 'Value name is not 16 hexadecimal characters'
+            Kind     = $null
+            Data     = $null
+            Length   = $null
+            Metadata = $null
+            Hash     = ''
+        }
+    }
+
+    try {
+        $Kind = $RegistryKey.GetValueKind($ValueName)
+        $Data = $RegistryKey.GetValue(
+            $ValueName,
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+    }
+    catch {
+        return [pscustomobject]@{
+            Match    = $false
+            Reason   = "Value was not found or could not be read: $($_.Exception.Message)"
+            Kind     = $null
+            Data     = $null
+            Length   = $null
+            Metadata = $null
+            Hash     = ''
+        }
+    }
+
+    if (
+        $Kind -ne [Microsoft.Win32.RegistryValueKind]::Binary -or
+        $Data -isnot [byte[]]
+    ) {
+        return [pscustomobject]@{
+            Match    = $false
+            Reason   = "Registry type is $Kind rather than REG_BINARY"
+            Kind     = $Kind
+            Data     = $null
+            Length   = $null
+            Metadata = $null
+            Hash     = ''
+        }
+    }
+
+    [byte[]] $Data = $Data
+
+    [uint64] $Encoded = [Convert]::ToUInt64($ValueName, 16)
+    [uint64] $Decoded = $Encoded -bxor $WnfXorMask
+    [uint64] $Metadata = $Decoded -band [uint64]0x7FF
+    $Hash = Get-Sha256Hex -Bytes $Data
+
+    $Reasons = New-Object 'System.Collections.Generic.List[string]'
+
+    if ($Data.Length -ne $TargetLength) {
+        [void] $Reasons.Add(
+            "Data length is $($Data.Length), expected $TargetLength"
+        )
+    }
+
+    if ($Metadata -ne $TargetMetadata) {
+        [void] $Reasons.Add(
+            ('Metadata is 0x{0:X3}, expected 0x{1:X3}' -f
+                $Metadata,
+                $TargetMetadata)
+        )
+    }
+
+    if ($Hash -ne $TargetPayloadHash) {
+        [void] $Reasons.Add('Complete payload hash differs from target')
+    }
+
+    return [pscustomobject]@{
+        Match    = ($Reasons.Count -eq 0)
+        Reason   = $Reasons -join '; '
+        Kind     = $Kind
+        Data     = $Data
+        Length   = $Data.Length
+        Metadata = $Metadata
+        Hash     = $Hash
+    }
+}
+
+
+function Find-WnfToolkitFamilyReference {
+    param(
+        [Parameter(Mandatory)]
+        [Microsoft.Win32.RegistryKey] $RegistryKey
+    )
+
+    $Handle = $RegistryKey.Handle.DangerousGetHandle()
+    $InitialValueCount = $RegistryKey.ValueCount
+
+    for ([uint32] $EnumerationIndex = 0; ; $EnumerationIndex++) {
+        if (
+            $EnumerationIndex -eq 0 -or
+            ($EnumerationIndex % $ProgressInterval) -eq 0
+        ) {
+            $PercentComplete = 0
+
+            if ($InitialValueCount -gt 0) {
+                $PercentComplete = [Math]::Min(
+                    100,
+                    [Math]::Floor(
+                        ($EnumerationIndex / $InitialValueCount) * 100
+                    )
+                )
+            }
+
+            Write-Progress `
+                -Activity 'Locating exact WNF reference-family value' `
+                -Status "$EnumerationIndex registry values examined" `
+                -PercentComplete $PercentComplete
+        }
+
+        $NameCapacity = 16384
+        $NameBuffer = New-Object Text.StringBuilder($NameCapacity)
+        [uint32] $NameLength = $NameCapacity
+        [uint32] $ValueType = 0
+        [uint32] $DataLength = 0
+
+        $EnumResult =
+            [WnfLiveAuditNative]::RegEnumValue(
+                $Handle,
+                $EnumerationIndex,
+                $NameBuffer,
+                [ref] $NameLength,
+                [IntPtr]::Zero,
+                [ref] $ValueType,
+                $null,
+                [ref] $DataLength
+            )
+
+        if (
+            $EnumResult -eq
+            [WnfLiveAuditNative]::ERROR_NO_MORE_ITEMS
+        ) {
+            break
+        }
+
+        if (
+            $EnumResult -ne [WnfLiveAuditNative]::ERROR_SUCCESS -and
+            $EnumResult -ne [WnfLiveAuditNative]::ERROR_MORE_DATA
+        ) {
+            throw (
+                "RegEnumValue failed at index $EnumerationIndex " +
+                "with Win32 error $EnumResult while locating the reference."
+            )
+        }
+
+        $ValueName = $NameBuffer.ToString()
+
+        if (
+            $ValueName -notmatch '^[0-9A-Fa-f]{16}$' -or
+            $ValueType -ne 3 -or
+            $DataLength -ne $TargetLength
+        ) {
+            continue
+        }
+
+        try {
+            [uint64] $Encoded = [Convert]::ToUInt64($ValueName, 16)
+            [uint64] $Decoded = $Encoded -bxor $WnfXorMask
+            [uint64] $Metadata = $Decoded -band [uint64]0x7FF
+
+            if ($Metadata -ne $TargetMetadata) {
+                continue
+            }
+        }
+        catch {
+            continue
+        }
+
+        $Validation =
+            Test-WnfToolkitFamilyValue `
+                -RegistryKey $RegistryKey `
+                -ValueName $ValueName
+
+        if ($Validation.Match) {
+            Write-Progress `
+                -Activity 'Locating exact WNF reference-family value' `
+                -Completed
+
+            return [pscustomobject]@{
+                ValueName  = $ValueName
+                Data       = $Validation.Data
+                Length     = $Validation.Length
+                Metadata   = $Validation.Metadata
+                Hash       = $Validation.Hash
+            }
+        }
+    }
+
+    Write-Progress `
+        -Activity 'Locating exact WNF reference-family value' `
+        -Completed
+
+    return $null
 }
 
 
@@ -566,7 +794,10 @@ if (-not [Environment]::Is64BitProcess) {
     throw 'Run this script from 64-bit Windows PowerShell.'
 }
 
-if ($ReferenceValueName -notmatch '^[0-9A-Fa-f]{16}$') {
+if (
+    $ReferenceValueName -and
+    $ReferenceValueName -notmatch '^[0-9A-Fa-f]{16}$'
+) {
     throw (
         'ReferenceValueName must be a 16-character hexadecimal ' +
         'WNF state name.'
@@ -628,41 +859,64 @@ try {
         throw "Registry key was not found: $RegistryDisplayPath"
     }
 
-    try {
-        $ReferenceKind = $Key.GetValueKind($ReferenceValueName)
-    }
-    catch {
-        throw "Reference value was not found: $ReferenceValueName"
-    }
+    $ReferenceSelectionSource = ''
+    $Reference = $null
 
-    if (
-        $ReferenceKind -ne
-        [Microsoft.Win32.RegistryValueKind]::Binary
-    ) {
-        throw (
-            "Reference value is $ReferenceKind rather than REG_BINARY."
+    if ($ReferenceValueName) {
+        $Validation =
+            Test-WnfToolkitFamilyValue `
+                -RegistryKey $Key `
+                -ValueName $ReferenceValueName
+
+        if (-not $Validation.Match) {
+            throw (
+                "ReferenceValueName '$ReferenceValueName' does not match " +
+                "the toolkit's exact target family: $($Validation.Reason)"
+            )
+        }
+
+        $Reference = [pscustomobject]@{
+            ValueName = $ReferenceValueName
+            Data      = $Validation.Data
+            Length    = $Validation.Length
+            Metadata  = $Validation.Metadata
+            Hash      = $Validation.Hash
+        }
+
+        $ReferenceSelectionSource = 'Explicit -ReferenceValueName'
+    }
+    else {
+        Write-Host
+        Write-Host (
+            'No ReferenceValueName supplied; locating an exact member of ' +
+            "the toolkit's confirmed target family..."
         )
+
+        $Reference = Find-WnfToolkitFamilyReference -RegistryKey $Key
+
+        if ($null -eq $Reference) {
+            throw (
+                'No exact toolkit target-family value was found. Expected ' +
+                'a 16-character hexadecimal REG_BINARY value with decoded ' +
+                ('metadata 0x{0:X3}, length {1} bytes, and SHA-256 {2}.' -f
+                    $TargetMetadata,
+                    $TargetLength,
+                    $TargetPayloadHash)
+            )
+        }
+
+        $ReferenceValueName = $Reference.ValueName
+        $ReferenceSelectionSource =
+            'Auto-discovered exact toolkit family member'
     }
 
-    [byte[]] $ReferenceData = $Key.GetValue($ReferenceValueName)
-
-    if ($null -eq $ReferenceData) {
-        throw 'Reference value data could not be read.'
-    }
-
-    [uint64] $ReferenceEncoded =
-        [Convert]::ToUInt64($ReferenceValueName, 16)
-
-    [uint64] $ReferenceDecoded =
-        $ReferenceEncoded -bxor $WnfXorMask
-
-    [uint64] $ReferenceMetadata =
-        $ReferenceDecoded -band [uint64]0x7FF
-
-    $ReferenceHash = Get-Sha256Hex -Bytes $ReferenceData
+    [byte[]] $ReferenceData = $Reference.Data
+    [uint64] $ReferenceMetadata = $Reference.Metadata
+    $ReferenceHash = [string] $Reference.Hash
 
     Write-Host
     Write-Host "Registry key:        $RegistryDisplayPath"
+    Write-Host "Reference source:    $ReferenceSelectionSource"
     Write-Host "Reference value:     $ReferenceValueName"
     Write-Host (
         'Reference metadata:  0x{0:X3}' -f $ReferenceMetadata
@@ -1223,6 +1477,7 @@ try {
         RegistryPath               = $RegistryDisplayPath
         SelectionSource            = $SelectionSource
         ReuseNamesFromCsv          = $ReuseNamesFromCsv
+        ReferenceSelectionSource    = $ReferenceSelectionSource
         ReferenceValueName         = $ReferenceValueName
         ReferenceMetadata          =
             ('0x{0:X3}' -f $ReferenceMetadata)
