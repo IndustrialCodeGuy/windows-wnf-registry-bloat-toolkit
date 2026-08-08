@@ -23,6 +23,32 @@ This is an operational troubleshooting toolkit developed and tested primarily on
 - WNF is a private Windows mechanism. Native WNF results are diagnostic evidence, not an official Microsoft stale-state determination.
 - A large `Notifications` key alone is not enough to justify cleanup.
 
+## Confirmed recurrence findings
+
+Controlled post-cleanup testing on Windows Server 2019 RDS hosts has narrowed the recurrence mechanism substantially.
+
+On a reproducible affected host:
+
+- Enabling RDP printer redirection caused new members of the exact 72-byte metadata-`0x011` target family to appear during login.
+- The number of new target-family values matched the number of redirected printers observed in the controlled test.
+- Disabling printer redirection stopped the observed per-login target-family growth.
+- Procmon attributed the WNF creation path to the `DsmSvc` service host:
+  `svchost.exe -k netsvcs -p -s DsmSvc`.
+- The captured call stack showed `DeviceSetupManager.dll` calling `ntdll!ZwCreateWnfStateName`, followed by kernel activity that persisted the WNF state under the `Notifications` registry key.
+- A high-frequency live-state watcher sampling at 100 ms across multiple controlled logins observed no subscribers, no state data, no nonzero change stamps, and no non-quiescent samples for the newly created target-family values during the observation windows.
+- Procmon tracing around logoff showed `spoolsv.exe` removing session-specific redirected printer queues and corresponding `HKLM\SYSTEM\CurrentControlSet\Enum\SWD\PRINTENUM` instances. A subsequent login created new redirected-printer instances, and the DsmSvc WNF creation path repeated.
+
+These findings establish the observed trigger and creation path on the reproducible host. They do **not** establish why every Server 2019 RDS host handles the redirected-printer/device lifecycle the same way.
+
+A comparison host in the same environment currently behaves differently:
+
+- It does not continue adding target-family values during the same printer-redirection login tests.
+- It retains a large historical population of `SWD\PRINTENUM` entries, while the reproducible host exposes primarily the currently redirected printer instances during the same style of inspection.
+- Updating the reproducible host from OS build `17763.8511` to `17763.9020` did not by itself stop the per-printer recurrence.
+- Testing the observed differences in `fDisableCpm` and `UseUniversalPrinterDriverFirst` did not change the reproducible behavior.
+
+The reason for the different redirected-printer/device-state behavior between the hosts remains unknown. The current evidence supports treating WNF accumulation as a consequence of repeated redirected-printer device setup on the affected host, not as proof that printer redirection itself is universally defective.
+
 ## When this toolkit may be useful
 
 A server may warrant investigation when several of these appear together:
@@ -50,7 +76,6 @@ No single symptom or count is a universal indicator. The toolkit is intended to 
 | `Analyze-WnfUserScopePayloads.ps1` | Analyzes the 136-byte user-scoped WNF family and its user/AppContainer security-descriptor structure. | No |
 | `Audit-WnfSystemScopeLiveState.ps1` | Automatically locates an exact member of the confirmed 72-byte target family, then queries a sample or full scan for observable live-state evidence. | No |
 | `Watch-WnfSystemScopeLiveState.ps1` | Repeatedly polls exact target-family values over a timed window, tracks newly observed values, and records whether live-state evidence ever appears during settling or post-settle periods. | No |
-| `Trace-WnfNotificationWriters.ps1` | Traces audited root-level `Notifications` writes, correlates them with process/PID/account/service information, and classifies each written value against the exact target family. | Temporarily changes Registry audit policy/SACL when required; does not modify WNF values |
 | `Get-AppXProfilePackageTimeline.ps1` | Builds a chronological inventory of per-profile AppX package-folder population and core package presence. | No |
 | `Collect-AppXReadinessAudit-Raw.ps1` | Collects detailed AppX, AppReadiness, shell, authentication, StateRepository, profile, service, and event-log evidence. | No |
 | `Collect-AppXReadinessAudit-Redacted.ps1` | Collects similar evidence with best-effort redaction of environment-specific identifiers. | No |
@@ -61,7 +86,6 @@ No single symptom or count is a universal indicator. The toolkit is intended to 
 - Windows Server 2019 is the primary tested platform.
 - 64-bit Windows PowerShell 5.1.
 - Administrator rights for complete registry, package, service, profile, and event-log access.
-- The writer tracer temporarily enables successful Registry auditing when required and adds a narrowly scoped Set Value SACL to the `Notifications` root; it records and normally restores the prior configuration when the trace ends.
 - A local administrator and physical, hypervisor, or out-of-band console session for production cleanup.
 - Sufficient local storage for CSV output, event exports, and registry backup files.
 - A verified VM snapshot, image-level backup, or equivalent rollback method before cleanup.
@@ -87,7 +111,6 @@ windows-wnf-registry-bloat-toolkit/
 │   ├── Analyze-WnfUserScopePayloads.ps1
 │   ├── Audit-WnfSystemScopeLiveState.ps1
 │   ├── Watch-WnfSystemScopeLiveState.ps1
-│   ├── Trace-WnfNotificationWriters.ps1
 │   ├── Collect-AppXReadinessAudit-Raw.ps1
 │   ├── Collect-AppXReadinessAudit-Redacted.ps1
 │   ├── Find-WnfNotificationValuesOutsideReferenceFamily.ps1
@@ -368,45 +391,7 @@ For the cleanest login experiment, start the watcher before the controlled RDS/R
 
 Absence of subscribers, state data, nonzero change stamps, and non-quiescent observations across a high-frequency polling window is strong evidence of dormancy during that window. It is not an absolute guarantee that a state can never be used later.
 
-### Writer tracer
-
-Use `Trace-WnfNotificationWriters.ps1` when new target-family values are being created and the next goal is to identify the process associated with the registry writes:
-
-```powershell
-.\Scripts\Trace-WnfNotificationWriters.ps1
-```
-
-The default trace runs for 30 minutes. A different duration can be supplied:
-
-```powershell
-.\Scripts\Trace-WnfNotificationWriters.ps1 -DurationMinutes 120
-```
-
-The tracer:
-
-- Uses Windows Security Event 4657 to observe writes to the root-level `Notifications` key.
-- Temporarily enables successful Registry auditing when required.
-- Adds a narrowly scoped Success / Set Value SACL to the `Notifications` root.
-- Re-reads each affected value and checks it against the toolkit's exact target-family boundary.
-- Correlates matching writes with process ID, process image, account, logon ID, live process information, and hosted Windows services when available.
-- Records the original audit configuration before modification and normally restores it when the trace exits.
-- Writes a `Recovery-State.json` file that can be used to restore configuration after an interrupted trace.
-
-Command-line collection is intentionally disabled by default because process command lines can contain sensitive information. Enable it only when needed:
-
-```powershell
-.\Scripts\Trace-WnfNotificationWriters.ps1 -IncludeCommandLine
-```
-
-If a trace is interrupted before its temporary audit configuration can be restored:
-
-```powershell
-.\Scripts\Trace-WnfNotificationWriters.ps1 `
-    -RestoreConfigurationFrom `
-    'C:\ProgramData\WindowsWnfRegistryBloatToolkit\Wnf-WriterTrace-...\Recovery-State.json'
-```
-
-The writer tracer can identify the process associated with an audited registry write when Windows exposes that information, but it does not capture kernel or user-mode call stacks. If attribution resolves only to a generic Windows host or kernel path, Procmon or ETW stack tracing may still be required.
+In controlled recurrence testing, the watcher was run at a 100 ms interval across multiple RDS login cycles while new target-family values were being created. No observable live-state evidence was recorded for those values during the captured windows.
 
 ## Remediation target
 
@@ -451,9 +436,13 @@ The same server showed:
 
 A complete live scan of **more than 250,000** matching values found no subscribers, state data, nonzero change stamps, non-quiescent states, or native-query failures during the scan.
 
-Comparison systems in the same environment helped show that the repeated family was associated with the interactive RDS workload, but those comparisons did not establish a universal healthy count or identify the creating process.
+Subsequent controlled post-cleanup testing identified a repeatable creation path on an affected RDS host: redirected printers were instantiated during login, `DsmSvc` / `DeviceSetupManager.dll` called `ZwCreateWnfStateName`, and new exact target-family values were persisted under `Notifications`. High-frequency live-state monitoring did not observe those newly created values becoming active during the captured login/post-login windows.
 
-The project documentation intentionally focuses on the repeatable diagnostic pattern rather than treating those originating counts as thresholds.
+The primary heavily affected server was successfully remediated with the toolkit. After cleanup and reboot, previously impaired existing-user functionality returned without separate per-user AppX, OneDrive, WindowsApps-permission, or profile repair.
+
+Comparison systems in the same environment remain important because the redirected-printer/device-state lifecycle is not identical on every host. The current testing does not establish a universal healthy count or a universal explanation for why some hosts repeatedly create the target-family values while another comparison host does not.
+
+The project documentation intentionally focuses on the repeatable diagnostic pattern rather than treating originating counts or one environment's printer behavior as universal thresholds.
 
 ## Post-cleanup validation
 
@@ -475,7 +464,9 @@ Before returning a server to normal production use, verify:
 
 Monitor the Notifications structure after cleanup, reboot, controlled user logons, and during the initial production period.
 
-Cleanup removes accumulated state. It may not identify or permanently stop the process that created it.
+Where recurrence is observed, compare the exact target-family count before and after controlled RDS logins with printer redirection enabled and disabled. On the reproducible host used during development, printer redirection was the confirmed trigger for per-login target-family growth.
+
+Cleanup removes accumulated state. It does not change RDS printer-redirection policy or guarantee that the redirected-printer/device lifecycle that created the states will stop recurring.
 
 ## What this project does not do
 
@@ -487,7 +478,9 @@ Cleanup removes accumulated state. It may not identify or permanently stop the p
 - It does not disable AppReadiness, SystemEventsBroker, or BrokerInfrastructure.
 - It does not run Microsoft's historical `wnfcleanup.exe`.
 - It does not include or wrap the community `clnotifications` executable.
-- It does not guarantee complete causal attribution of WNF state creation; the writer tracer identifies audited registry writers when available but does not capture kernel or user-mode call stacks.
+- It does not guarantee complete causal attribution of WNF state creation. The Security-audit writer tracer may not observe the internal WNF persistence path; Procmon/ETW can still be required for call-stack attribution.
+- It does not modify printer-redirection configuration or the redirected-printer/device lifecycle that has been observed to trigger recurrence on an affected host.
+- It does not explain the currently observed host-to-host difference in `SWD\PRINTENUM` retention/reuse behavior.
 - It does not guarantee that the originating accumulation will not recur.
 - It does not replace normal backup, change-control, incident-management, or vendor-support decisions.
 
@@ -503,6 +496,7 @@ Do not commit production diagnostic output such as:
 *.hiv
 *.reg
 *.evtx
+*.pml
 production CSV exports
 production ZIP archives
 server-specific handoff documents
@@ -537,6 +531,7 @@ Issues and pull requests are welcome, especially for:
 - Improved profile-timeline analysis.
 - Better post-remediation monitoring.
 - Additional recurrence/writer-attribution testing.
+- Redirected-printer and `SWD\PRINTENUM` lifecycle comparison data.
 - Additional native-query validation.
 - Documentation corrections.
 
