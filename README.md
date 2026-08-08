@@ -72,7 +72,7 @@ No single symptom or count is a universal indicator. The toolkit is intended to 
 | --- | --- | --- |
 | `Get-WnfNotificationsStructuralInventory.ps1` | Inventories and classifies the complete root-level `Notifications` key, including WNF metadata, payload groups, and sequence statistics. | No |
 | `Get-WnfNotificationValues.ps1` | Reads and exports a selected range of root-level `Notifications` values for inspection. | No |
-| `Find-WnfNotificationValuesOutsideReferenceFamily.ps1` | Identifies values outside the selected repeated reference family for further analysis. | No |
+| `Find-WnfNotificationValuesOutsideReferenceFamily.ps1` | Auto-discovers an exact member of the confirmed 72-byte target family and identifies root values outside that family for further analysis. | No |
 | `Analyze-WnfUserScopePayloads.ps1` | Analyzes the 136-byte user-scoped WNF family and its user/AppContainer security-descriptor structure. | No |
 | `Audit-WnfSystemScopeLiveState.ps1` | Automatically locates an exact member of the confirmed 72-byte target family, then queries a sample or full scan for observable live-state evidence. | No |
 | `Watch-WnfSystemScopeLiveState.ps1` | Repeatedly polls exact target-family values over a timed window, tracks newly observed values, and records whether live-state evidence ever appears during settling or post-settle periods. | No |
@@ -438,7 +438,7 @@ A complete live scan of **more than 250,000** matching values found no subscribe
 
 Subsequent controlled post-cleanup testing identified a repeatable creation path on an affected RDS host: redirected printers were instantiated during login, `DsmSvc` / `DeviceSetupManager.dll` called `ZwCreateWnfStateName`, and new exact target-family values were persisted under `Notifications`. High-frequency live-state monitoring did not observe those newly created values becoming active during the captured login/post-login windows.
 
-The primary heavily affected server was successfully remediated with the toolkit. After cleanup and reboot, previously impaired existing-user functionality returned without separate per-user AppX, OneDrive, WindowsApps-permission, or profile repair.
+The primary heavily affected server was successfully remediated with the toolkit. After targeted cleanup, previously impaired existing-user functionality returned without separate per-user AppX, OneDrive, WindowsApps-permission, or profile repair.
 
 Comparison systems in the same environment remain important because the redirected-printer/device-state lifecycle is not identical on every host. The current testing does not establish a universal healthy count or a universal explanation for why some hosts repeatedly create the target-family values while another comparison host does not.
 
@@ -478,7 +478,7 @@ Cleanup removes accumulated state. It does not change RDS printer-redirection po
 - It does not disable AppReadiness, SystemEventsBroker, or BrokerInfrastructure.
 - It does not run Microsoft's historical `wnfcleanup.exe`.
 - It does not include or wrap the community `clnotifications` executable.
-- It does not guarantee complete causal attribution of WNF state creation. The Security-audit writer tracer may not observe the internal WNF persistence path; Procmon/ETW can still be required for call-stack attribution.
+- It does not guarantee complete causal attribution of WNF state creation across all systems. Procmon or ETW may still be required for call-stack attribution.
 - It does not modify printer-redirection configuration or the redirected-printer/device lifecycle that has been observed to trigger recurrence on an affected host.
 - It does not explain the currently observed host-to-host difference in `SWD\PRINTENUM` retention/reuse behavior.
 - It does not guarantee that the originating accumulation will not recur.
@@ -488,7 +488,7 @@ Cleanup removes accumulated state. It does not change RDS printer-redirection po
 
 Treat collected output as operationally sensitive.
 
-The remediation output can contain system, account, session, registry, and backup information. Structural, live-audit, and timed-watcher output includes WNF state names and hashes. Writer-trace output can additionally contain account names, SIDs, process paths, session/logon information, service names, and process command lines when `-IncludeCommandLine` is explicitly used. Redacted AppX output should still be manually reviewed before publication or external sharing.
+The remediation output can contain system, account, session, registry, and backup information. Structural, live-audit, and timed-watcher output includes WNF state names and hashes. Procmon or other external trace output can additionally contain account names, process paths, session information, registry paths, and call stacks. Redacted AppX output should still be manually reviewed before publication or external sharing.
 
 Do not commit production diagnostic output such as:
 
