@@ -49,6 +49,8 @@ No single symptom or count is a universal indicator. The toolkit is intended to 
 | `Find-WnfNotificationValuesOutsideReferenceFamily.ps1` | Identifies values outside the selected repeated reference family for further analysis. | No |
 | `Analyze-WnfUserScopePayloads.ps1` | Analyzes the 136-byte user-scoped WNF family and its user/AppContainer security-descriptor structure. | No |
 | `Audit-WnfSystemScopeLiveState.ps1` | Automatically locates an exact member of the confirmed 72-byte target family, then queries a sample or full scan for observable live-state evidence. | No |
+| `Watch-WnfSystemScopeLiveState.ps1` | Repeatedly polls exact target-family values over a timed window, tracks newly observed values, and records whether live-state evidence ever appears during settling or post-settle periods. | No |
+| `Trace-WnfNotificationWriters.ps1` | Traces audited root-level `Notifications` writes, correlates them with process/PID/account/service information, and classifies each written value against the exact target family. | Temporarily changes Registry audit policy/SACL when required; does not modify WNF values |
 | `Get-AppXProfilePackageTimeline.ps1` | Builds a chronological inventory of per-profile AppX package-folder population and core package presence. | No |
 | `Collect-AppXReadinessAudit-Raw.ps1` | Collects detailed AppX, AppReadiness, shell, authentication, StateRepository, profile, service, and event-log evidence. | No |
 | `Collect-AppXReadinessAudit-Redacted.ps1` | Collects similar evidence with best-effort redaction of environment-specific identifiers. | No |
@@ -59,6 +61,7 @@ No single symptom or count is a universal indicator. The toolkit is intended to 
 - Windows Server 2019 is the primary tested platform.
 - 64-bit Windows PowerShell 5.1.
 - Administrator rights for complete registry, package, service, profile, and event-log access.
+- The writer tracer temporarily enables successful Registry auditing when required and adds a narrowly scoped Set Value SACL to the `Notifications` root; it records and normally restores the prior configuration when the trace ends.
 - A local administrator and physical, hypervisor, or out-of-band console session for production cleanup.
 - Sufficient local storage for CSV output, event exports, and registry backup files.
 - A verified VM snapshot, image-level backup, or equivalent rollback method before cleanup.
@@ -83,6 +86,8 @@ windows-wnf-registry-bloat-toolkit/
 ├── Scripts/
 │   ├── Analyze-WnfUserScopePayloads.ps1
 │   ├── Audit-WnfSystemScopeLiveState.ps1
+│   ├── Watch-WnfSystemScopeLiveState.ps1
+│   ├── Trace-WnfNotificationWriters.ps1
 │   ├── Collect-AppXReadinessAudit-Raw.ps1
 │   ├── Collect-AppXReadinessAudit-Redacted.ps1
 │   ├── Find-WnfNotificationValuesOutsideReferenceFamily.ps1
@@ -210,6 +215,48 @@ The simulation performs the same per-candidate structural and live-state checks 
 
 For a large candidate family, this can take several hours.
 
+### Remediation script parameters
+
+`Invoke-WnfNotificationsRemediation.ps1` supports the following script-specific parameters:
+
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `-Mode` | `Audit` | Selects read-only structural audit or guarded cleanup mode. Valid values are `Audit` and `Cleanup`. |
+| `-ExpectedCandidateCount` | `0` | Optional additional cleanup guard. A nonzero value requires the immediate cleanup inventory to match the supplied exact-target candidate count; `0` accepts the current count. |
+| `-ExpectedUserScopedCount` | `-1` | Optional additional guard for the 136-byte metadata-`0x091` user-scoped family. `-1` skips this comparison. |
+| `-ExpectedTotalRootValues` | `0` | Optional additional guard for the total root-value count. `0` skips this comparison. |
+| `-OutputRoot` | `%ProgramData%\WindowsWnfRegistryBloatToolkit` | Parent directory for the timestamped run folder. |
+| `-IncludeLiveCheck` | Off | In `Audit` mode, performs the same per-value native WNF live checks used by cleanup without deleting anything. |
+| `-RollbackConfirmed` | Off | Required acknowledgement for an actual cleanup run. It confirms that an independent rollback path has been verified. |
+| `-MaintenanceWindowConfirmed` | Off | Required acknowledgement for an actual cleanup run. It confirms that cleanup is being performed during an approved maintenance window. |
+| `-AllowNonConsoleSession` | Off | Explicitly overrides the default requirement to run cleanup from a console session. The override is logged. |
+| `-AllowNonLocalAccount` | Off | Explicitly overrides the default requirement to run cleanup using a local account. The override is logged. |
+| `-MaximumDeleteFailures` | `5` | Maximum deletion failures tolerated before cleanup stops. |
+| `-ProgressInterval` | `2500` | Number of values between progress-display updates during large inventories. |
+| `-CsvBatchSize` | `500` | Number of action rows buffered before batched CSV output. |
+| `-FlushInterval` | `5000` | Number of processed candidates between forced output flushes. |
+
+Because the script supports PowerShell `ShouldProcess`, `-WhatIf` can be used with cleanup mode to run the full per-candidate simulation without deleting values:
+
+```powershell
+.\Scripts\Invoke-WnfNotificationsRemediation.ps1 `
+    -Mode Cleanup `
+    -WhatIf
+```
+
+The console-session and local-account checks are independent safety gates. If both conditions are intentionally being overridden, both switches are required:
+
+```powershell
+.\Scripts\Invoke-WnfNotificationsRemediation.ps1 `
+    -Mode Cleanup `
+    -RollbackConfirmed `
+    -MaintenanceWindowConfirmed `
+    -AllowNonConsoleSession `
+    -AllowNonLocalAccount
+```
+
+Do not use either override unless the corresponding safety condition has been deliberately reviewed and accepted.
+
 ## Production cleanup
 
 > [!WARNING]
@@ -281,6 +328,85 @@ Cleanup does not target:
 - Values created after the fixed candidate list was captured.
 
 The script does not reboot automatically.
+
+## Post-cleanup and recurrence investigation
+
+Cleanup removes accumulated target-family values, but it does not by itself identify why new values may be created later. The following read-only/diagnostic tools are intended for controlled recurrence testing.
+
+### Timed live-state watcher
+
+Use `Watch-WnfSystemScopeLiveState.ps1` to repeatedly query exact target-family values over a defined observation window:
+
+```powershell
+.\Scripts\Watch-WnfSystemScopeLiveState.ps1 `
+    -IntervalMilliseconds 250 `
+    -DurationMinutes 15 `
+    -SettleSeconds 120
+```
+
+The watcher:
+
+- Finds exact current members of the fixed target family.
+- Adds newly observed target-family values to a persistent watch set for the remainder of the run.
+- Repeatedly records native-query success, subscribers, quiescence, state-data size, and change stamp.
+- Gives each newly observed value its own settling timer beginning when that value is first seen.
+- Separates `LoginOrSettling` samples from later `PostSettle` samples.
+- Reports whether observable live-state evidence was ever seen during the run and whether it was seen after the settling period.
+
+For short-lived activity around a controlled login, a smaller interval can be used:
+
+```powershell
+.\Scripts\Watch-WnfSystemScopeLiveState.ps1 `
+    -IntervalMilliseconds 100 `
+    -DurationMinutes 20 `
+    -SettleSeconds 120
+```
+
+Sub-second polling increases registry, native-query, and output-file activity. The watcher is read-only with respect to the `Notifications` registry values and WNF state names.
+
+For the cleanest login experiment, start the watcher before the controlled RDS/RD Gateway login. It can also be run as `SYSTEM` in an on-demand Scheduled Task so that observation continues while the initiating administrator logs off and reconnects.
+
+Absence of subscribers, state data, nonzero change stamps, and non-quiescent observations across a high-frequency polling window is strong evidence of dormancy during that window. It is not an absolute guarantee that a state can never be used later.
+
+### Writer tracer
+
+Use `Trace-WnfNotificationWriters.ps1` when new target-family values are being created and the next goal is to identify the process associated with the registry writes:
+
+```powershell
+.\Scripts\Trace-WnfNotificationWriters.ps1
+```
+
+The default trace runs for 30 minutes. A different duration can be supplied:
+
+```powershell
+.\Scripts\Trace-WnfNotificationWriters.ps1 -DurationMinutes 120
+```
+
+The tracer:
+
+- Uses Windows Security Event 4657 to observe writes to the root-level `Notifications` key.
+- Temporarily enables successful Registry auditing when required.
+- Adds a narrowly scoped Success / Set Value SACL to the `Notifications` root.
+- Re-reads each affected value and checks it against the toolkit's exact target-family boundary.
+- Correlates matching writes with process ID, process image, account, logon ID, live process information, and hosted Windows services when available.
+- Records the original audit configuration before modification and normally restores it when the trace exits.
+- Writes a `Recovery-State.json` file that can be used to restore configuration after an interrupted trace.
+
+Command-line collection is intentionally disabled by default because process command lines can contain sensitive information. Enable it only when needed:
+
+```powershell
+.\Scripts\Trace-WnfNotificationWriters.ps1 -IncludeCommandLine
+```
+
+If a trace is interrupted before its temporary audit configuration can be restored:
+
+```powershell
+.\Scripts\Trace-WnfNotificationWriters.ps1 `
+    -RestoreConfigurationFrom `
+    'C:\ProgramData\WindowsWnfRegistryBloatToolkit\Wnf-WriterTrace-...\Recovery-State.json'
+```
+
+The writer tracer can identify the process associated with an audited registry write when Windows exposes that information, but it does not capture kernel or user-mode call stacks. If attribution resolves only to a generic Windows host or kernel path, Procmon or ETW stack tracing may still be required.
 
 ## Remediation target
 
@@ -361,7 +487,7 @@ Cleanup removes accumulated state. It may not identify or permanently stop the p
 - It does not disable AppReadiness, SystemEventsBroker, or BrokerInfrastructure.
 - It does not run Microsoft's historical `wnfcleanup.exe`.
 - It does not include or wrap the community `clnotifications` executable.
-- It does not identify the process that originally created each WNF state.
+- It does not guarantee complete causal attribution of WNF state creation; the writer tracer identifies audited registry writers when available but does not capture kernel or user-mode call stacks.
 - It does not guarantee that the originating accumulation will not recur.
 - It does not replace normal backup, change-control, incident-management, or vendor-support decisions.
 
@@ -369,7 +495,7 @@ Cleanup removes accumulated state. It may not identify or permanently stop the p
 
 Treat collected output as operationally sensitive.
 
-The remediation output can contain system, account, session, registry, and backup information. Structural and live-audit output includes WNF state names and hashes. Redacted AppX output should still be manually reviewed before publication or external sharing.
+The remediation output can contain system, account, session, registry, and backup information. Structural, live-audit, and timed-watcher output includes WNF state names and hashes. Writer-trace output can additionally contain account names, SIDs, process paths, session/logon information, service names, and process command lines when `-IncludeCommandLine` is explicitly used. Redacted AppX output should still be manually reviewed before publication or external sharing.
 
 Do not commit production diagnostic output such as:
 
@@ -410,6 +536,7 @@ Issues and pull requests are welcome, especially for:
 - Safer output and redaction.
 - Improved profile-timeline analysis.
 - Better post-remediation monitoring.
+- Additional recurrence/writer-attribution testing.
 - Additional native-query validation.
 - Documentation corrections.
 
