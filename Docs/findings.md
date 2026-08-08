@@ -134,6 +134,42 @@ Native query failures:                 0
 
 The `Exists, no strong live evidence` result is intentional terminology. A permanent registry-backed WNF state can report that its state name exists without showing the subscriber, state-data, change-stamp, or quiescence signals used here as stronger evidence of current activity.
 
+## Confirmed recurrence and creation path
+
+Controlled post-cleanup testing on a reproducible Windows Server 2019 RDS host identified a repeatable trigger and creation path for the exact target family.
+
+With RDP printer redirection enabled:
+
+- New exact 72-byte metadata-`0x011` target-family values appeared during login.
+- In the controlled tests, the number of new target-family values matched the number of redirected printers presented to the session.
+- Disabling printer redirection stopped the observed per-login target-family growth.
+- Procmon attributed the creation path to the `DsmSvc` service host:
+  `svchost.exe -k netsvcs -p -s DsmSvc`.
+- The captured stack showed `DeviceSetupManager.dll` calling `ntdll!ZwCreateWnfStateName`, followed by kernel activity that persisted the WNF state under the `Notifications` key.
+- Procmon tracing around logoff showed `spoolsv.exe` removing session-specific redirected printer queues and corresponding `HKLM\SYSTEM\CurrentControlSet\Enum\SWD\PRINTENUM` instances. A subsequent login created new redirected-printer instances and the DsmSvc WNF-creation path repeated.
+
+The timed watcher provided a second, independent observation. At a 100 ms polling interval across multiple controlled logins, newly created target-family values showed no subscribers, no state data, no nonzero change stamps, and no non-quiescent samples during the captured observation windows.
+
+These results establish the observed trigger, creation path, and post-creation live-state behavior on the reproducible host. They do not establish that every Windows Server 2019 RDS host handles redirected printers in the same way or that printer redirection is universally defective.
+
+### Comparison-host difference
+
+A comparison RDS host in the same environment currently behaves differently:
+
+- The same printer-redirection login tests do not continue adding target-family values.
+- It retains a large historical population of `SWD\PRINTENUM` entries.
+- The reproducible host, during the same style of inspection, exposes primarily the currently redirected printer instances.
+- Updating the reproducible host from OS build `17763.8511` to `17763.9020` did not by itself stop the per-printer recurrence.
+- Testing the observed differences in `fDisableCpm` and `UseUniversalPrinterDriverFirst` did not change the reproducible behavior.
+
+The reason for this host-to-host redirected-printer/device-state difference remains unknown.
+
+## Production remediation result
+
+The primary heavily affected server was successfully remediated with the toolkit's targeted cleanup. Previously impaired existing-user functionality returned without separate per-user AppX re-registration, OneDrive repair, WindowsApps-permission changes, or profile repair.
+
+This is strong operational validation of the cleanup as a recovery action on that server. It does not by itself prove that every downstream symptom on every system has the same cause, and it does not establish that cleanup permanently corrects the redirected-printer/device-state behavior that can recreate the target family.
+
 ## AppX and AppReadiness failure pattern
 
 A server affected by this condition may show a continuous retry loop rather than a single AppX error.
@@ -198,7 +234,7 @@ C:\Users\<profile>\AppData\Local\Packages
 Use:
 
 ```powershell
-.\scripts\Get-AppXProfilePackageTimeline.ps1
+.\Scripts\Get-AppXProfilePackageTimeline.ps1
 ```
 
 An affected timeline may show:
@@ -266,9 +302,9 @@ Run the same structural inventory on other systems and compare:
 
 In the originating environment, the affected host reached 256,746 members of the repeated family despite less than 24 hours of uptime. Two other RDS hosts using the same external access path had approximately 18,000 values after 16 days of uptime and approximately 66,000 after 37 days. A lightly used file server had 93 Notifications values, and two additional non-Gateway servers had none of the repeated 72-byte family.
 
-This supports the conclusion that the affected server was an extreme outlier and that the family correlated with interactive-session workload in that environment. It does **not** establish a universal threshold, prove that RD Gateway is the writer, or identify the creating process.
+Those comparisons established that the primary server was an extreme outlier, but they did not identify the cause. Subsequent controlled testing on a reproducible RDS host tied new target-family creation to redirected-printer setup and the `DsmSvc` / `DeviceSetupManager.dll` WNF-creation path described above.
 
-If the family begins growing again after cleanup, use Process Monitor or another registry trace to capture writes to the Notifications key.
+The comparison hosts still demonstrate why a universal threshold is inappropriate. One host currently does not reproduce the per-login accumulation despite similar printer-redirection testing, and the reason for that difference remains unresolved.
 
 ## Historical Microsoft precedent
 
@@ -318,7 +354,7 @@ The toolkit does not assume:
 - Zero subscribers is sufficient by itself for deletion.
 - A reboot automatically clears the condition.
 - StateRepository lock events prove database corruption.
-- A particular RDS or broker component is the writer.
+- The redirected-printer recurrence path observed on one host applies identically to every Windows Server 2019 RDS host.
 - One healthy server establishes a universal threshold.
 
-Use the combination of profile, AppX, structural, live-state, and comparison evidence.
+Use the combination of profile, AppX, structural, live-state, recurrence, and comparison evidence.
