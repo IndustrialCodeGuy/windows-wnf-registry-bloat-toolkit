@@ -78,14 +78,16 @@ At the same time, AppX and AppReadiness logs showed continuous registration fail
 
 Comparison with other servers reinforced that value count alone is not a cleanup rule. Systems with similar interactive workloads could contain substantial quantities of the same registration family without yet showing the same degree of failure, while servers without that workload contained little or none of it. Reboots also did not necessarily clear the accumulated registrations.
 
-For that reason, this toolkit does not define a universal healthy count and does not infer the creating process from the correlation. Cleanup is based on the exact target-family structure, live-state checks, supporting AppX symptoms, and administrator review rather than a numeric threshold.
+Subsequent controlled post-cleanup testing identified a repeatable recurrence path on an affected RDS host. With printer redirection enabled, each redirected printer observed in the controlled test corresponded with a newly created exact target-family value during login. Disabling printer redirection stopped that per-login growth. Procmon captured `DsmSvc` / `DeviceSetupManager.dll` calling `ZwCreateWnfStateName` as the WNF creation path. A 100 ms timed live-state watch across multiple logins observed no subscriber, state-data, nonzero-change-stamp, or non-quiescent evidence for the newly created values during the observation windows.
+
+For that reason, this toolkit still does not define a universal healthy count. Cleanup is based on the exact target-family structure, live-state checks, supporting AppX symptoms, and administrator review rather than a numeric threshold. The confirmed printer-redirection recurrence result is evidence from the reproducible host, not a claim that every RDS host behaves identically.
 
 ## First check: profile package timeline
 
 Run:
 
 ```powershell
-.\scripts\Get-AppXProfilePackageTimeline.ps1
+.\Scripts\Get-AppXProfilePackageTimeline.ps1
 ```
 
 The report is sorted by profile-folder creation time and records:
@@ -109,7 +111,7 @@ The transition should be treated as a time range, not an exact failure timestamp
 Run:
 
 ```powershell
-.\scripts\Get-WnfNotificationsStructuralInventory.ps1
+.\Scripts\Get-WnfNotificationsStructuralInventory.ps1
 ```
 
 This performs a read-only inventory of the root values under the Windows `Notifications` registry key.
@@ -143,7 +145,7 @@ Do not infer safety or danger from a single numeric threshold.
 Where practical, run the structural inventory on comparable systems:
 
 ```powershell
-.\scripts\Get-WnfNotificationsStructuralInventory.ps1 `
+.\Scripts\Get-WnfNotificationsStructuralInventory.ps1 `
     -ServerLabel 'Comparison-RDS-01'
 ```
 
@@ -156,14 +158,16 @@ Useful comparisons include:
 
 The goal is to determine whether the repeated family is normal for the environment, whether it appears to accumulate with a particular workload, and whether the affected server is an outlier.
 
-Correlation is not proof of the process creating the values. The registry entries do not expose a creator process or per-value creation timestamp.
+Where recurrence testing is practical, also compare controlled RDS logins with printer redirection enabled and disabled. On the reproducible development host, printer redirection was the confirmed trigger for per-login target-family growth. A comparison host in the same environment currently does not reproduce that accumulation and retains a much larger historical `SWD\PRINTENUM` population; the reason for that difference remains unknown.
+
+The registry entries themselves still do not expose a creator process or per-value creation timestamp. Procmon or equivalent tracing is required to attribute the creation path.
 
 ## Fourth check: live WNF state
 
 After the structure is understood, run a sample live audit:
 
 ```powershell
-.\scripts\Audit-WnfSystemScopeLiveState.ps1
+.\Scripts\Audit-WnfSystemScopeLiveState.ps1
 ```
 
 The script checks the repeated system-scoped family for observable live-state evidence, including:
@@ -177,25 +181,36 @@ The script checks the repeated system-scoped family for observable live-state ev
 After validating a sample, a complete scan can be run:
 
 ```powershell
-.\scripts\Audit-WnfSystemScopeLiveState.ps1 -FullScan
+.\Scripts\Audit-WnfSystemScopeLiveState.ps1 -FullScan
 ```
 
 A full scan of a heavily populated key can take several hours.
 
 The absence of subscribers, state data, change stamps, and non-quiescent states is strong evidence that the values were dormant during the scan, but it is not an absolute guarantee that a permanent state name could never be referenced again.
 
+For controlled recurrence testing, `Watch-WnfSystemScopeLiveState.ps1` can follow existing and newly created exact-family values at sub-second intervals:
+
+```powershell
+.\Scripts\Watch-WnfSystemScopeLiveState.ps1 `
+    -IntervalMilliseconds 100 `
+    -DurationMinutes 20 `
+    -SettleSeconds 120
+```
+
+For the cleanest login test, start the watcher before the RDS login, for example as `SYSTEM` in an on-demand Scheduled Task. In development testing, this method observed newly created target-family values from the login period onward without recording observable live-state evidence during the sampled windows.
+
 ## Fifth check: collect AppX and AppReadiness evidence
 
 For local operational troubleshooting:
 
 ```powershell
-.\scripts\Collect-AppXReadinessAudit-Raw.ps1
+.\Scripts\Collect-AppXReadinessAudit-Raw.ps1
 ```
 
 For output intended to be reviewed or shared more broadly:
 
 ```powershell
-.\scripts\Collect-AppXReadinessAudit-Redacted.ps1
+.\Scripts\Collect-AppXReadinessAudit-Redacted.ps1
 ```
 
 The collectors gather evidence from the AppX, AppReadiness, AppModel, TWinUI, StateRepository, shell, authentication, profile, Application, and System event sources where available.
@@ -222,12 +237,14 @@ At that point, use the remediation procedure rather than attempting broad regist
 
 The toolkit cannot, by itself:
 
-- Identify the exact process that originally created every WNF state.
-- Determine a creation time or last-use time for each state.
+- Determine a creation time or last-use time for each state from the registry entry alone.
 - Establish a universal "healthy" Notifications value count.
-- Prove that RD Gateway, RD Connection Broker, SystemEventsBroker, or any other specific component is the writer.
+- Establish that the redirected-printer/DsmSvc recurrence path observed on one host applies identically to every RDS host.
+- Explain the currently observed host-to-host difference in `SWD\PRINTENUM` retention and recurrence behavior.
 - Guarantee that the accumulation will not recur after cleanup.
 - Determine that every 72-byte WNF registration on every Windows version is safe to remove.
+
+External tracing can add evidence beyond the built-in scripts. On the reproducible host, Procmon identified the `DsmSvc` / `DeviceSetupManager.dll` → `ZwCreateWnfStateName` creation path.
 
 The remediation tool is intentionally narrow and should remain that way.
 
