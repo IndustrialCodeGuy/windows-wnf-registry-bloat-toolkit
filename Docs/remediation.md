@@ -15,25 +15,25 @@ Establish that the server shows a matching evidence pattern.
 Recommended read-only checks:
 
 ```powershell
-.\scripts\Get-AppXProfilePackageTimeline.ps1
+.\Scripts\Get-AppXProfilePackageTimeline.ps1
 ```
 
 ```powershell
-.\scripts\Get-WnfNotificationsStructuralInventory.ps1
+.\Scripts\Get-WnfNotificationsStructuralInventory.ps1
 ```
 
 ```powershell
-.\scripts\Audit-WnfSystemScopeLiveState.ps1
+.\Scripts\Audit-WnfSystemScopeLiveState.ps1
 ```
 
 ```powershell
-.\scripts\Collect-AppXReadinessAudit-Raw.ps1
+.\Scripts\Collect-AppXReadinessAudit-Raw.ps1
 ```
 
 or, for best-effort redacted output:
 
 ```powershell
-.\scripts\Collect-AppXReadinessAudit-Redacted.ps1
+.\Scripts\Collect-AppXReadinessAudit-Redacted.ps1
 ```
 
 Consider cleanup only when the evidence supports a broad server-level condition rather than an isolated application or user-profile problem.
@@ -75,7 +75,7 @@ The script does not intentionally delete:
 Audit mode is the default:
 
 ```powershell
-.\scripts\Invoke-WnfNotificationsRemediation.ps1
+.\Scripts\Invoke-WnfNotificationsRemediation.ps1
 ```
 
 This performs the script's immediate structural inventory and exports the current candidate set without changing registry data.
@@ -91,7 +91,7 @@ Previously approved counts may still be supplied as optional additional safeguar
 Before actual cleanup, run:
 
 ```powershell
-.\scripts\Invoke-WnfNotificationsRemediation.ps1 `
+.\Scripts\Invoke-WnfNotificationsRemediation.ps1 `
     -Mode Cleanup `
     -WhatIf
 ```
@@ -123,13 +123,15 @@ Before actual cleanup:
 4. Create and verify a VM snapshot, image-level backup, or equivalent rollback method.
 5. Retain relevant AppX/AppReadiness event logs and current diagnostic output.
 6. Record known pre-existing failures such as Start, Search, OneDrive, Files On-Demand, or slow logons.
-7. Disable new RDS logons and ensure Gateway-mediated user sessions are disconnected.
-8. Log off ordinary user sessions.
+7. Prevent new ordinary RDS user logons using the environment's normal maintenance controls.
+8. Allow ordinary user sessions to exit and ensure no normal users remain connected.
 9. Reboot the server.
 10. After reboot, preferably sign in through the physical, hypervisor, or
     out-of-band console with a local administrator account.
 
-Based on the observed correlation between the repeated WNF family and Gateway-mediated RDS user activity, it is advisable to keep Gateway users disconnected during cleanup and avoid using a Gateway session for the maintenance work. A physical, hypervisor, or out-of-band console session is preferred. A direct RDP session that does not traverse the Gateway may be lower risk, but this was not specifically validated during the investigation. This is a precautionary recommendation: the investigation did not identify RD Gateway itself as the writer or establish that a direct non-Gateway RDP session would interfere with cleanup.
+A physical, hypervisor, or out-of-band console session with a local administrator remains the preferred cleanup path because it minimizes dependencies on the RDS user-session stack during low-level maintenance. The remediation script enforces the local-account and console-session checks independently by default. `-AllowNonLocalAccount` and `-AllowNonConsoleSession` are explicit, logged overrides for environments where those conditions have been deliberately reviewed and accepted.
+
+Controlled recurrence testing later identified redirected-printer setup, not RD Gateway itself, as the repeatable target-family creation trigger on a reproducible affected host.
 
 ## Automatic registry backup
 
@@ -150,7 +152,7 @@ The automatic backup is not a substitute for a verified VM or image-level rollba
 Run:
 
 ```powershell
-.\scripts\Invoke-WnfNotificationsRemediation.ps1 `
+.\Scripts\Invoke-WnfNotificationsRemediation.ps1 `
     -Mode Cleanup `
     -RollbackConfirmed `
     -MaintenanceWindowConfirmed
@@ -159,6 +161,19 @@ Run:
 The script performs another immediate structural inventory and presents the current candidate information before cleanup. By default, run output is written under `%ProgramData%\WindowsWnfRegistryBloatToolkit\Wnf-Remediation-<Mode>-<timestamp>`.
 
 PowerShell's high-impact confirmation is then used before deletion.
+
+If cleanup is deliberately being performed from a non-console session with a non-local account, both independent overrides are required:
+
+```powershell
+.\Scripts\Invoke-WnfNotificationsRemediation.ps1 `
+    -Mode Cleanup `
+    -RollbackConfirmed `
+    -MaintenanceWindowConfirmed `
+    -AllowNonConsoleSession `
+    -AllowNonLocalAccount
+```
+
+Do not use either override unless the corresponding safety condition has been deliberately reviewed and accepted.
 
 ## Per-value safety checks
 
@@ -189,9 +204,11 @@ The script does not rely on deletion failure as a test for whether a state is in
 
 ## After cleanup
 
-Reboot the server immediately after the targeted cleanup.
+Reboot the server after the targeted cleanup before returning it to normal production use.
 
 Do not restore normal RDS/Gateway access until the initial validation is complete.
+
+Run `Get-WnfNotificationsStructuralInventory.ps1` after cleanup/reboot to confirm the exact target-family count. If cleanup removed every exact target-family member, `Audit-WnfSystemScopeLiveState.ps1` has no current family member to use as its automatic reference and will stop with a "No exact toolkit target-family value was found" message. In that post-cleanup context, zero exact matches in the structural inventory is the expected result.
 
 ## Validation checklist
 
@@ -224,21 +241,31 @@ After recovery, record structural inventory results:
 - Immediately after cleanup.
 - After reboot.
 - After controlled local logons.
-- After controlled RDS/Gateway logon and logoff cycles.
+- Before and after controlled RDS logon/logoff cycles.
 - Daily during the initial monitoring period.
 
-If the repeated family begins growing again, use Process Monitor boot logging or another registry trace to identify processes writing to:
+On the reproducible development host, controlled testing established that printer redirection was the trigger for per-login target-family growth. The number of new exact-family values matched the number of redirected printers observed in the test, and disabling printer redirection stopped that growth.
+
+If recurrence is observed, compare:
+
+1. A baseline exact-family count.
+2. One controlled RDS login with printer redirection enabled.
+3. The post-login exact-family count.
+4. A comparable login with printer redirection disabled, when operationally acceptable.
+
+Use `Watch-WnfSystemScopeLiveState.ps1` when the goal is to observe whether newly created exact-family values show subscribers, state data, nonzero change stamps, or non-quiescent state over time.
+
+For writer attribution, Procmon proved useful in the tested recurrence path. Useful Procmon filters include:
 
 ```text
 HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Notifications
+HKLM\SYSTEM\CurrentControlSet\Enum\SWD\PRINTENUM
+HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Print\Printers
 ```
 
-Useful follow-up questions include:
+On the reproducible host, Procmon captured `DsmSvc` / `DeviceSetupManager.dll` calling `ZwCreateWnfStateName` during redirected-printer setup, and `spoolsv.exe` removing the session-specific redirected printer and `SWD\PRINTENUM` state during logoff.
 
-- Does each interactive logon create new values?
-- Does a clean logoff retire any values?
-- Does growth occur only through a particular access path?
-- Does a particular service or process perform the `RegSetValue` operations?
+A comparison host currently does not reproduce the same WNF accumulation and retains a much larger historical `SWD\PRINTENUM` population. The reason for that host-to-host difference remains unknown.
 
 ## Actions not recommended
 
@@ -293,6 +320,6 @@ Technical indicators:
 - AppX/AppReadiness registration loops stop.
 - AppContainer creation succeeds.
 - StateRepository contention returns to normal levels.
-- The repeated WNF family does not resume uncontrolled growth during controlled user activity.
+- The immediate excessive target-family population is removed and unrelated Notifications data remains intact.
 
-If the registry count begins growing again while symptoms remain resolved, continue monitoring and identify the writer before assuming that another cleanup is required.
+If the exact family begins growing again while symptoms remain resolved, determine whether the same redirected-printer recurrence path is present before assuming that another cleanup is required. Cleanup has been validated as a recovery action; it is not currently documented as a permanent correction for the underlying redirected-printer/device-state difference.
