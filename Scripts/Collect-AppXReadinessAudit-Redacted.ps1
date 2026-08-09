@@ -11,8 +11,9 @@
 
 .DESCRIPTION
     Collects AppReadiness, AppX deployment, AppModel, shell, Search,
-    authentication, StateRepository, User Profile Service, Application, and
-    System event data when available. It also records event-log retention,
+    authentication, StateRepository, User Profile Service, OneDrive updater,
+    Application, and System event data when available. It also records
+    event-log retention,
     relevant service state, AppX and provisioned-package state, per-profile
     LocalAppData\Packages counts, and AppRepository resiliency-file details.
 
@@ -44,6 +45,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $StartTime = (Get-Date).AddDays(-$Days)
+$OperatingSystem = Get-CimInstance Win32_OperatingSystem
+$LastBootUpTime = [datetime] $OperatingSystem.LastBootUpTime
+$LastBootWithinRequestedWindow = ($LastBootUpTime -ge $StartTime)
+$PostBootStartTime = if ($LastBootWithinRequestedWindow) {
+    $LastBootUpTime
+}
+else {
+    $StartTime
+}
 $Timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $OutputDirectory = Join-Path $OutputRoot "AppX-Readiness-Audit-Redacted-$Timestamp"
 
@@ -57,43 +67,174 @@ New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $script:SidTokens = @{}
 $script:NextUnknownSidToken = 1
 $script:GuidTokens = @{}
-$script:NextGuidToken = 1
+$script:NextGuidTokenByType = @{
+    'GUID'             = 1
+    'TENANT-GUID'      = 1
+    'CLIENT-GUID'      = 1
+    'CORRELATION-GUID' = 1
+    'ACTIVITY-GUID'    = 1
+    'RELATED-GUID'     = 1
+}
 $script:ProfilePathTokens = @{}
 $script:ProfileNameTokens = @{}
+$script:QualifiedAccountTokens = @{}
+$script:AmbiguousProfileNames = @{}
+$script:EnvironmentIdentifierTokens = @{}
+$script:HostTokens = @{}
+$script:NextHostToken = 1
+$script:UnknownProfileTokens = @{}
+$script:NextUnknownProfileToken = 1
+
+function Add-ProfileNameToken {
+    param(
+        [AllowNull()][string] $Name,
+        [Parameter(Mandatory)][string] $Token
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return
+    }
+
+    if ($script:AmbiguousProfileNames.ContainsKey($Name)) {
+        return
+    }
+
+    if ($script:ProfileNameTokens.ContainsKey($Name)) {
+        if ([string] $script:ProfileNameTokens[$Name] -ne $Token) {
+            $script:ProfileNameTokens.Remove($Name)
+            $script:AmbiguousProfileNames[$Name] = $true
+        }
+        return
+    }
+
+    $script:ProfileNameTokens[$Name] = $Token
+}
+
+function Get-UnmappedProfileToken {
+    param([Parameter(Mandatory)][string] $Name)
+
+    $Normalized = $Name.ToUpperInvariant()
+
+    if ($script:UnknownProfileTokens.ContainsKey($Normalized)) {
+        return [string] $script:UnknownProfileTokens[$Normalized]
+    }
+
+    $Token =
+        'PROFILE-UNK-{0:D3}' -f $script:NextUnknownProfileToken
+
+    $script:NextUnknownProfileToken++
+    $script:UnknownProfileTokens[$Normalized] = $Token
+
+    return $Token
+}
+
+function Get-RedactedHostToken {
+    param([Parameter(Mandatory)][string] $HostName)
+
+    $Normalized = $HostName.ToUpperInvariant()
+
+    if ($script:HostTokens.ContainsKey($Normalized)) {
+        return [string] $script:HostTokens[$Normalized]
+    }
+
+    $Token = 'HOST-{0:D3}' -f $script:NextHostToken
+    $script:NextHostToken++
+    $script:HostTokens[$Normalized] = $Token
+
+    return $Token
+}
 
 $KnownProfiles = @(
     Get-CimInstance Win32_UserProfile |
         Where-Object {
             -not $_.Special -and
             -not [string]::IsNullOrWhiteSpace($_.LocalPath)
-        }
+        } |
+        Sort-Object SID, LocalPath
 )
 
 $ProfileNumber = 1
 
 foreach ($Profile in $KnownProfiles) {
-    $ProfileToken = 'PROFILE-{0:D3}' -f $ProfileNumber
-    $ProfileNumber++
+    $ProfileToken = $null
 
-    if (-not [string]::IsNullOrWhiteSpace($Profile.SID)) {
-        $script:SidTokens[[string] $Profile.SID] = $ProfileToken
+    if (
+        -not [string]::IsNullOrWhiteSpace($Profile.SID) -and
+        $script:SidTokens.ContainsKey([string] $Profile.SID)
+    ) {
+        $ProfileToken = [string] $script:SidTokens[[string] $Profile.SID]
+    }
+    else {
+        $ProfileToken = 'PROFILE-{0:D3}' -f $ProfileNumber
+        $ProfileNumber++
+
+        if (-not [string]::IsNullOrWhiteSpace($Profile.SID)) {
+            $script:SidTokens[[string] $Profile.SID] = $ProfileToken
+        }
     }
 
     if (-not [string]::IsNullOrWhiteSpace($Profile.LocalPath)) {
         $script:ProfilePathTokens[[string] $Profile.LocalPath] =
             $ProfileToken
 
-        $ProfileLeaf = Split-Path -Leaf $Profile.LocalPath
+        Add-ProfileNameToken `
+            -Name (Split-Path -Leaf $Profile.LocalPath) `
+            -Token $ProfileToken
+    }
 
-        if (
-            -not [string]::IsNullOrWhiteSpace($ProfileLeaf) -and
-            -not $script:ProfileNameTokens.ContainsKey($ProfileLeaf)
-        ) {
-            $script:ProfileNameTokens[$ProfileLeaf] = $ProfileToken
+    # Link the SID to its translated DOMAIN\user representation when Windows
+    # can resolve it. This keeps PackageUserInformation, profile paths, and
+    # event-log account references on the same PROFILE token.
+    if (-not [string]::IsNullOrWhiteSpace($Profile.SID)) {
+        try {
+            $SidObject = New-Object `
+                System.Security.Principal.SecurityIdentifier `
+                -ArgumentList ([string] $Profile.SID)
+
+            $NtAccount = $SidObject.Translate(
+                [System.Security.Principal.NTAccount]
+            ).Value
+
+            if (-not [string]::IsNullOrWhiteSpace($NtAccount)) {
+                $script:QualifiedAccountTokens[$NtAccount] = $ProfileToken
+
+                $AccountLeaf = ($NtAccount -split '\\', 2)[-1]
+                Add-ProfileNameToken `
+                    -Name $AccountLeaf `
+                    -Token $ProfileToken
+            }
+        }
+        catch {
         }
     }
 }
 
+# Typed environment tokens retain useful context without publishing values.
+foreach ($EnvironmentIdentifier in @(
+    [pscustomobject]@{
+        Value = $env:COMPUTERNAME
+        Token = 'SERVER-001'
+    }
+    [pscustomobject]@{
+        Value = $env:USERDNSDOMAIN
+        Token = 'DNS-DOMAIN-001'
+    }
+    [pscustomobject]@{
+        Value = $env:USERDOMAIN
+        Token = 'DOMAIN-001'
+    }
+)) {
+    if (
+        -not [string]::IsNullOrWhiteSpace($EnvironmentIdentifier.Value) -and
+        -not $script:EnvironmentIdentifierTokens.ContainsKey(
+            [string] $EnvironmentIdentifier.Value
+        )
+    ) {
+        $script:EnvironmentIdentifierTokens[
+            [string] $EnvironmentIdentifier.Value
+        ] = [string] $EnvironmentIdentifier.Token
+    }
+}
 
 function Get-RedactedSidToken {
     param(
@@ -118,12 +259,10 @@ function Get-RedactedSidToken {
     return $Token
 }
 
-
-
 function Get-RedactedGuidToken {
     param(
-        [AllowNull()]
-        [string] $GuidText
+        [AllowNull()][string] $GuidText,
+        [string] $TokenType = 'GUID'
     )
 
     if ([string]::IsNullOrWhiteSpace($GuidText)) {
@@ -137,15 +276,21 @@ function Get-RedactedGuidToken {
         return [string] $script:GuidTokens[$Normalized]
     }
 
-    $Token =
-        'GUID-{0:D5}' -f $script:NextGuidToken
+    if (-not $script:NextGuidTokenByType.ContainsKey($TokenType)) {
+        $script:NextGuidTokenByType[$TokenType] = 1
+    }
 
-    $script:NextGuidToken++
+    $Token = '{0}-{1:D5}' -f `
+        $TokenType, `
+        ([int] $script:NextGuidTokenByType[$TokenType])
+
+    $script:NextGuidTokenByType[$TokenType] =
+        [int] $script:NextGuidTokenByType[$TokenType] + 1
+
     $script:GuidTokens[$Normalized] = $Token
 
     return $Token
 }
-
 
 function Protect-DiagnosticText {
     param(
@@ -159,8 +304,12 @@ function Protect-DiagnosticText {
 
     $Protected = [string] $Text
 
-    # Replace complete known profile paths before replacing account names.
-    foreach ($ProfilePath in $script:ProfilePathTokens.Keys) {
+    # Replace longest profile paths first. This prevents C:\Users\user from
+    # partially replacing C:\Users\user.DOMAIN and breaking correlation.
+    foreach (
+        $ProfilePath in $script:ProfilePathTokens.Keys |
+            Sort-Object { $_.Length } -Descending
+    ) {
         $Token = $script:ProfilePathTokens[$ProfilePath]
 
         $Protected = [regex]::Replace(
@@ -171,8 +320,29 @@ function Protect-DiagnosticText {
         )
     }
 
-    # Replace known profile/account leaf names with their profile tokens.
-    foreach ($ProfileName in $script:ProfileNameTokens.Keys) {
+    # Replace exact translated DOMAIN\user accounts before leaf-name matching.
+    foreach (
+        $QualifiedAccount in $script:QualifiedAccountTokens.Keys |
+            Sort-Object { $_.Length } -Descending
+    ) {
+        $Token = $script:QualifiedAccountTokens[$QualifiedAccount]
+
+        $Protected = [regex]::Replace(
+            $Protected,
+            '(?<![A-Za-z0-9._-])' +
+                [regex]::Escape($QualifiedAccount) +
+                '(?![A-Za-z0-9._-])',
+            ('<{0}>' -f $Token),
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+    }
+
+    # Replace known account/profile leaf names with the profile token linked
+    # to their SID. Ambiguous names are intentionally excluded from this map.
+    foreach (
+        $ProfileName in $script:ProfileNameTokens.Keys |
+            Sort-Object { $_.Length } -Descending
+    ) {
         $Token = $script:ProfileNameTokens[$ProfileName]
 
         $AccountPattern =
@@ -213,6 +383,15 @@ function Protect-DiagnosticText {
         }
     }
 
+    # Package/event data sometimes contains qualified accounts inside square
+    # brackets from authorities other than the collector's current domain.
+    $Protected = [regex]::Replace(
+        $Protected,
+        '\[(?<Account>[A-Za-z0-9._-]+\\[A-Za-z0-9._$-]+)\]',
+        '[<ACCOUNT>]',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+
     # Do not require a trailing word boundary: AppRepository filenames place
     # an underscore immediately after the SID, and underscore is a word char.
     $SidPattern =
@@ -231,9 +410,6 @@ function Protect-DiagnosticText {
         [Text.RegularExpressions.RegexOptions]::IgnoreCase
     )
 
-    # Replace all GUIDs consistently. This covers tenant IDs, client IDs,
-    # AppX activity IDs, resiliency-file GUIDs, CLSIDs, and correlation IDs
-    # while retaining within-run correlation through stable tokens.
     $GuidPattern =
         '(?<![0-9A-Fa-f])\{?' +
         '[0-9A-Fa-f]{8}-' +
@@ -243,6 +419,59 @@ function Protect-DiagnosticText {
         '[0-9A-Fa-f]{12}' +
         '\}?(?![0-9A-Fa-f])'
 
+    # Preserve the semantic role of common AAD GUIDs where the surrounding
+    # text identifies it, while keeping stable tokens for repeated values.
+    $Protected = [regex]::Replace(
+        $Protected,
+        '(?<Prefix>https://login\.microsoftonline\.com/)(?<Guid>' +
+            $GuidPattern + ')',
+        {
+            param($Match)
+
+            return $Match.Groups['Prefix'].Value + (
+                '<{0}>' -f (
+                    Get-RedactedGuidToken `
+                        -GuidText $Match.Groups['Guid'].Value `
+                        -TokenType 'TENANT-GUID'
+                )
+            )
+        },
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+
+    foreach ($GuidContext in @(
+        [pscustomobject]@{
+            Pattern = '(?<Prefix>\bclient(?:\s+id)?\s*[:=]\s*)(?<Guid>' +
+                $GuidPattern + ')'
+            Type = 'CLIENT-GUID'
+        }
+        [pscustomobject]@{
+            Pattern = '(?<Prefix>\bcorrelation(?:\s+id)?\s*[:=]\s*)(?<Guid>' +
+                $GuidPattern + ')'
+            Type = 'CORRELATION-GUID'
+        }
+    )) {
+        $TokenType = $GuidContext.Type
+
+        $Protected = [regex]::Replace(
+            $Protected,
+            $GuidContext.Pattern,
+            {
+                param($Match)
+
+                return $Match.Groups['Prefix'].Value + (
+                    '<{0}>' -f (
+                        Get-RedactedGuidToken `
+                            -GuidText $Match.Groups['Guid'].Value `
+                            -TokenType $TokenType
+                    )
+                )
+            },
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+    }
+
+    # Replace any remaining GUIDs consistently.
     $Protected = [regex]::Replace(
         $Protected,
         $GuidPattern,
@@ -263,21 +492,48 @@ function Protect-DiagnosticText {
         [Text.RegularExpressions.RegexOptions]::IgnoreCase
     )
 
-    foreach (
-        $Identifier in @(
-            $env:COMPUTERNAME
-            $env:USERDOMAIN
-            $env:USERDNSDOMAIN
-        )
-    ) {
-        if (-not [string]::IsNullOrWhiteSpace($Identifier)) {
-            $Protected = [regex]::Replace(
-                $Protected,
-                [regex]::Escape($Identifier),
-                '<REDACTED>',
-                [Text.RegularExpressions.RegexOptions]::IgnoreCase
-            )
+    # Redact unknown user-profile paths that were not represented by
+    # Win32_UserProfile at collection time, while preserving stable correlation.
+    $Protected = [regex]::Replace(
+        $Protected,
+        '(?i)C:\\Users\\(?<Name>(?!Public(?:\\|$)|Default(?: User)?(?:\\|$)|All Users(?:\\|$))[^\\\s"''<>|,;]+)',
+        {
+            param($Match)
+
+            $Token = Get-UnmappedProfileToken `
+                -Name $Match.Groups['Name'].Value
+
+            return 'C:\Users\<{0}>' -f $Token
         }
+    )
+
+    # Redact UNC host names not already covered by known environment tokens.
+    $Protected = [regex]::Replace(
+        $Protected,
+        '(?<!\\)\\\\(?<Host>[A-Za-z0-9][A-Za-z0-9._-]{0,252})\\',
+        {
+            param($Match)
+
+            $Token = Get-RedactedHostToken `
+                -HostName $Match.Groups['Host'].Value
+
+            return '\\<{0}>\' -f $Token
+        },
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+
+    # Replace known machine/domain identifiers with typed tokens. Sort by
+    # length so a DNS domain is not partially replaced by a shorter domain.
+    foreach (
+        $Identifier in $script:EnvironmentIdentifierTokens.Keys |
+            Sort-Object { $_.Length } -Descending
+    ) {
+        $Protected = [regex]::Replace(
+            $Protected,
+            [regex]::Escape($Identifier),
+            ('<{0}>' -f $script:EnvironmentIdentifierTokens[$Identifier]),
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
     }
 
     return $Protected
@@ -332,6 +588,45 @@ function Get-AllRegexMatches {
     ) -join ';'
 }
 
+function Get-EventErrorCodes {
+    param(
+        [AllowNull()][string] $Text
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return ''
+    }
+
+    $Codes = New-Object 'System.Collections.Generic.List[string]'
+
+    foreach (
+        $Match in [regex]::Matches(
+            $Text,
+            '\b0x[0-9A-Fa-f]{8}\b',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+    ) {
+        [void] $Codes.Add($Match.Value.ToUpperInvariant())
+    }
+
+    foreach (
+        $Match in [regex]::Matches(
+            $Text,
+            '\b(?:hr|hresult)\s*[:=]?\s*(?<Code>[0-9A-Fa-f]{8})\b',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+    ) {
+        [void] $Codes.Add(
+            ('0X{0}' -f $Match.Groups['Code'].Value.ToUpperInvariant())
+        )
+    }
+
+    return (
+        $Codes |
+        Sort-Object -Unique
+    ) -join ';'
+}
+
 function Convert-EventRecord {
     param(
         [Parameter(Mandatory)]
@@ -358,12 +653,24 @@ function Convert-EventRecord {
         $Correlation = $Xml.Event.System.Correlation
 
         if ($null -ne $Correlation) {
-            $ActivityId = Protect-DiagnosticText -Text (
-                [string] $Correlation.ActivityID
-            )
-            $RelatedActivityId = Protect-DiagnosticText -Text (
-                [string] $Correlation.RelatedActivityID
-            )
+            $RawActivityId = [string] $Correlation.ActivityID
+            $RawRelatedActivityId = [string] $Correlation.RelatedActivityID
+
+            if (-not [string]::IsNullOrWhiteSpace($RawActivityId)) {
+                $ActivityId = '<{0}>' -f (
+                    Get-RedactedGuidToken `
+                        -GuidText $RawActivityId `
+                        -TokenType 'ACTIVITY-GUID'
+                )
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($RawRelatedActivityId)) {
+                $RelatedActivityId = '<{0}>' -f (
+                    Get-RedactedGuidToken `
+                        -GuidText $RawRelatedActivityId `
+                        -TokenType 'RELATED-GUID'
+                )
+            }
         }
 
         $Execution = $Xml.Event.System.Execution
@@ -380,9 +687,7 @@ function Convert-EventRecord {
         -Text $Message `
         -Pattern '\bMicrosoft\.[A-Za-z0-9.-]+(?:_[A-Za-z0-9.\-]+)*\b'
 
-    $ErrorCodes = Get-AllRegexMatches `
-        -Text $Message `
-        -Pattern '\b0x[0-9A-Fa-f]{8}\b'
+    $ErrorCodes = Get-EventErrorCodes -Text $Message
 
     [pscustomobject]@{
         TimeCreated        = $Event.TimeCreated
@@ -548,7 +853,9 @@ $RelevantPattern =
     'backgroundTaskHost|' +
     'BrokerInfrastructure|' +
     'SystemEventsBroker|' +
-    'StateRepository'
+    'StateRepository|' +
+    'OneDriveUpdaterService|' +
+    'OneDrive(?:\.exe)?'
 
 foreach ($StandardLog in @('Application', 'System')) {
     Write-Host "Collecting relevant events from: $StandardLog"
@@ -616,13 +923,14 @@ $AllEvents |
     ) -NoTypeInformation -Encoding UTF8
 
 $AllEvents |
-    Group-Object LogName, EventId, Level |
+    Group-Object LogName, ProviderName, EventId, Level |
     ForEach-Object {
         $Example = $_.Group | Select-Object -First 1
         $Ordered = $_.Group | Sort-Object TimeCreated
 
         [pscustomobject]@{
             LogName       = $Example.LogName
+            ProviderName  = $Example.ProviderName
             EventId       = $Example.EventId
             Level         = $Example.Level
             Count         = $_.Count
@@ -642,9 +950,10 @@ $ErrorCodeRows = foreach ($Event in $AllEvents) {
 
     foreach ($Code in $Event.ErrorCodes -split ';') {
         [pscustomobject]@{
-            ErrorCode   = $Code
-            LogName     = $Event.LogName
-            EventId     = $Event.EventId
+            ErrorCode    = $Code
+            LogName      = $Event.LogName
+            ProviderName = $Event.ProviderName
+            EventId      = $Event.EventId
             PackageName = $Event.PackageName
             TimeCreated = $Event.TimeCreated
         }
@@ -652,7 +961,7 @@ $ErrorCodeRows = foreach ($Event in $AllEvents) {
 }
 
 $ErrorCodeRows |
-    Group-Object ErrorCode, LogName, EventId |
+    Group-Object ErrorCode, LogName, ProviderName, EventId |
     ForEach-Object {
         $Example = $_.Group | Select-Object -First 1
         $Ordered = $_.Group | Sort-Object TimeCreated
@@ -660,6 +969,7 @@ $ErrorCodeRows |
         [pscustomobject]@{
             ErrorCode     = $Example.ErrorCode
             LogName       = $Example.LogName
+            ProviderName  = $Example.ProviderName
             EventId       = $Example.EventId
             Count         = $_.Count
             FirstObserved = $Ordered[0].TimeCreated
@@ -690,6 +1000,127 @@ $AllEvents |
     Sort-Object Count -Descending |
     Export-Csv -LiteralPath (
         Join-Path $OutputDirectory 'Summary-ByPackage.csv'
+    ) -NoTypeInformation -Encoding UTF8
+
+# Keep the original requested-window summaries above, and also emit a second
+# view bounded by the most recent boot. When the boot predates the requested
+# collection window, the post-boot view is necessarily truncated to StartTime.
+$PostBootEvents = @(
+    $AllEvents |
+        Where-Object { $_.TimeCreated -ge $PostBootStartTime }
+)
+
+$PostBootEvents |
+    Sort-Object TimeCreated |
+    Export-Csv -LiteralPath (
+        Join-Path $OutputDirectory 'PostBoot-Relevant-Events.csv'
+    ) -NoTypeInformation -Encoding UTF8
+
+$PostBootEvents |
+    Group-Object LogName, ProviderName, EventId, Level |
+    ForEach-Object {
+        $Example = $_.Group | Select-Object -First 1
+        $Ordered = $_.Group | Sort-Object TimeCreated
+
+        [pscustomobject]@{
+            LogName       = $Example.LogName
+            ProviderName  = $Example.ProviderName
+            EventId       = $Example.EventId
+            Level         = $Example.Level
+            Count         = $_.Count
+            FirstObserved = $Ordered[0].TimeCreated
+            LastObserved  = $Ordered[-1].TimeCreated
+        }
+    } |
+    Sort-Object Count -Descending |
+    Export-Csv -LiteralPath (
+        Join-Path $OutputDirectory 'Summary-PostBoot-ByLog-EventId.csv'
+    ) -NoTypeInformation -Encoding UTF8
+
+$PostBootErrorCodeRows = foreach ($Event in $PostBootEvents) {
+    if ([string]::IsNullOrWhiteSpace($Event.ErrorCodes)) {
+        continue
+    }
+
+    foreach ($Code in $Event.ErrorCodes -split ';') {
+        [pscustomobject]@{
+            ErrorCode    = $Code
+            LogName      = $Event.LogName
+            ProviderName = $Event.ProviderName
+            EventId      = $Event.EventId
+            PackageName  = $Event.PackageName
+            TimeCreated  = $Event.TimeCreated
+        }
+    }
+}
+
+$PostBootErrorCodeRows |
+    Group-Object ErrorCode, LogName, ProviderName, EventId |
+    ForEach-Object {
+        $Example = $_.Group | Select-Object -First 1
+        $Ordered = $_.Group | Sort-Object TimeCreated
+
+        [pscustomobject]@{
+            ErrorCode     = $Example.ErrorCode
+            LogName       = $Example.LogName
+            ProviderName  = $Example.ProviderName
+            EventId       = $Example.EventId
+            Count         = $_.Count
+            FirstObserved = $Ordered[0].TimeCreated
+            LastObserved  = $Ordered[-1].TimeCreated
+        }
+    } |
+    Sort-Object Count -Descending |
+    Export-Csv -LiteralPath (
+        Join-Path $OutputDirectory 'Summary-PostBoot-ByErrorCode.csv'
+    ) -NoTypeInformation -Encoding UTF8
+
+$PostBootEvents |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_.PackageName) } |
+    Group-Object PackageName, EventId, ErrorCodes |
+    ForEach-Object {
+        $Example = $_.Group | Select-Object -First 1
+        $Ordered = $_.Group | Sort-Object TimeCreated
+
+        [pscustomobject]@{
+            PackageName   = $Example.PackageName
+            EventId       = $Example.EventId
+            ErrorCodes    = $Example.ErrorCodes
+            Count         = $_.Count
+            FirstObserved = $Ordered[0].TimeCreated
+            LastObserved  = $Ordered[-1].TimeCreated
+        }
+    } |
+    Sort-Object Count -Descending |
+    Export-Csv -LiteralPath (
+        Join-Path $OutputDirectory 'Summary-PostBoot-ByPackage.csv'
+    ) -NoTypeInformation -Encoding UTF8
+
+@(
+    [pscustomobject]@{
+        Scope            = 'RequestedWindow'
+        WindowStart      = $StartTime
+        WindowEnd        = Get-Date
+        EventCount       = $AllEvents.Count
+        BoundaryComplete = $true
+        Note             = 'Full requested collection window.'
+    }
+    [pscustomobject]@{
+        Scope            = 'PostBoot'
+        WindowStart      = $PostBootStartTime
+        WindowEnd        = Get-Date
+        EventCount       = $PostBootEvents.Count
+        BoundaryComplete = $LastBootWithinRequestedWindow
+        Note             = if ($LastBootWithinRequestedWindow) {
+            'Complete from the most recent boot.'
+        }
+        else {
+            'Most recent boot predates StartTime; post-boot view is truncated to the requested collection window.'
+        }
+    }
+) |
+    Export-Csv -LiteralPath (
+        Join-Path $OutputDirectory 'Event-Window-Summary.csv'
     ) -NoTypeInformation -Encoding UTF8
 
 $LogRetentionRows = foreach ($LogName in $TargetLogs) {
@@ -744,6 +1175,7 @@ $RelevantServiceNames = @(
     'ClipSVC'
     'UserManager'
     'ProfSvc'
+    'OneDriveUpdaterService'
 )
 
 $ServiceRows = foreach ($ServiceName in $RelevantServiceNames) {
@@ -1011,6 +1443,21 @@ $ValidationPatterns = @(
         Pattern   =
             '\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b'
     }
+    [pscustomobject]@{
+        CheckName = 'Raw user profile path'
+        Pattern   =
+            'C:\\Users\\' +
+            '(?!<PROFILE-(?:\d{3}|UNK-\d{3})>)' +
+            '(?!Public(?:\\|$)|Default(?: User)?(?:\\|$)|All Users(?:\\|$))' +
+            '[^\\\s"'',;]+'
+    }
+    [pscustomobject]@{
+        CheckName = 'Raw UNC host'
+        Pattern   =
+            '(?<!\\)\\\\' +
+            '(?!<HOST-\d{3}>\\)' +
+            '[A-Za-z0-9][A-Za-z0-9._-]{0,252}\\'
+    }
 )
 
 foreach ($Identifier in @(
@@ -1030,6 +1477,13 @@ foreach ($ProfilePath in $script:ProfilePathTokens.Keys) {
     $ValidationPatterns += [pscustomobject]@{
         CheckName = 'Raw profile path'
         Pattern   = [regex]::Escape($ProfilePath)
+    }
+}
+
+foreach ($QualifiedAccount in $script:QualifiedAccountTokens.Keys) {
+    $ValidationPatterns += [pscustomobject]@{
+        CheckName = 'Raw qualified account'
+        Pattern   = [regex]::Escape($QualifiedAccount)
     }
 }
 
@@ -1115,18 +1569,20 @@ else {
         ) -NoTypeInformation -Encoding UTF8
 }
 
-$OperatingSystem = Get-CimInstance Win32_OperatingSystem
 $ComputerSystem = Get-CimInstance Win32_ComputerSystem
 
 $SystemSummary = [pscustomobject]@{
     CollectedAt         = Get-Date
-    ServerLabel         = 'REDACTED-SERVER'
+    ServerLabel         = '<SERVER-001>'
     StartTime           = $StartTime
     DaysRequested       = $Days
     Caption             = $OperatingSystem.Caption
     Version             = $OperatingSystem.Version
     BuildNumber         = $OperatingSystem.BuildNumber
-    LastBootUpTime      = $OperatingSystem.LastBootUpTime
+    LastBootUpTime      = $LastBootUpTime
+    LastBootWithinRequestedWindow = $LastBootWithinRequestedWindow
+    PostBootWindowStart  = $PostBootStartTime
+    PostBootEventsExported = $PostBootEvents.Count
     UptimeDays          = [Math]::Round(
         ((Get-Date) - $OperatingSystem.LastBootUpTime).TotalDays,
         2
