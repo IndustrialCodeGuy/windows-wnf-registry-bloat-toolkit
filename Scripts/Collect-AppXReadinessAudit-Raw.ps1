@@ -11,8 +11,9 @@
 
 .DESCRIPTION
     Collects AppReadiness, AppX deployment, AppModel, shell, Search,
-    authentication, StateRepository, User Profile Service, Application, and
-    System event data when available. It also records event-log retention,
+    authentication, StateRepository, User Profile Service, OneDrive updater,
+    Application, and System event data when available. It also records
+    event-log retention,
     relevant service state, AppX and provisioned-package state, per-profile
     LocalAppData\Packages counts, and AppRepository resiliency-file details.
 
@@ -42,6 +43,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $StartTime = (Get-Date).AddDays(-$Days)
+$OperatingSystem = Get-CimInstance Win32_OperatingSystem
+$LastBootUpTime = [datetime] $OperatingSystem.LastBootUpTime
+$LastBootWithinRequestedWindow = ($LastBootUpTime -ge $StartTime)
+$PostBootStartTime = if ($LastBootWithinRequestedWindow) {
+    $LastBootUpTime
+}
+else {
+    $StartTime
+}
 $Timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $OutputDirectory = Join-Path $OutputRoot "AppX-Readiness-Audit-Raw-$Timestamp"
 
@@ -96,6 +106,45 @@ function Get-AllRegexMatches {
     ) -join ';'
 }
 
+function Get-EventErrorCodes {
+    param(
+        [AllowNull()][string] $Text
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return ''
+    }
+
+    $Codes = New-Object 'System.Collections.Generic.List[string]'
+
+    foreach (
+        $Match in [regex]::Matches(
+            $Text,
+            '\b0x[0-9A-Fa-f]{8}\b',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+    ) {
+        [void] $Codes.Add($Match.Value.ToUpperInvariant())
+    }
+
+    foreach (
+        $Match in [regex]::Matches(
+            $Text,
+            '\b(?:hr|hresult)\s*[:=]?\s*(?<Code>[0-9A-Fa-f]{8})\b',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+    ) {
+        [void] $Codes.Add(
+            ('0X{0}' -f $Match.Groups['Code'].Value.ToUpperInvariant())
+        )
+    }
+
+    return (
+        $Codes |
+        Sort-Object -Unique
+    ) -join ';'
+}
+
 function Convert-EventRecord {
     param(
         [Parameter(Mandatory)]
@@ -143,9 +192,7 @@ function Convert-EventRecord {
         -Text $Message `
         -Pattern '\bMicrosoft\.[A-Za-z0-9.-]+(?:_[A-Za-z0-9.\-]+)*\b'
 
-    $ErrorCodes = Get-AllRegexMatches `
-        -Text $Message `
-        -Pattern '\b0x[0-9A-Fa-f]{8}\b'
+    $ErrorCodes = Get-EventErrorCodes -Text $Message
 
     $UserSids = Get-AllRegexMatches `
         -Text $Message `
@@ -318,7 +365,9 @@ $RelevantPattern =
     'backgroundTaskHost|' +
     'BrokerInfrastructure|' +
     'SystemEventsBroker|' +
-    'StateRepository'
+    'StateRepository|' +
+    'OneDriveUpdaterService|' +
+    'OneDrive(?:\.exe)?'
 
 foreach ($StandardLog in @('Application', 'System')) {
     Write-Host "Collecting relevant events from: $StandardLog"
@@ -386,13 +435,14 @@ $AllEvents |
     ) -NoTypeInformation -Encoding UTF8
 
 $AllEvents |
-    Group-Object LogName, EventId, Level |
+    Group-Object LogName, ProviderName, EventId, Level |
     ForEach-Object {
         $Example = $_.Group | Select-Object -First 1
         $Ordered = $_.Group | Sort-Object TimeCreated
 
         [pscustomobject]@{
             LogName       = $Example.LogName
+            ProviderName  = $Example.ProviderName
             EventId       = $Example.EventId
             Level         = $Example.Level
             Count         = $_.Count
@@ -412,9 +462,10 @@ $ErrorCodeRows = foreach ($Event in $AllEvents) {
 
     foreach ($Code in $Event.ErrorCodes -split ';') {
         [pscustomobject]@{
-            ErrorCode   = $Code
-            LogName     = $Event.LogName
-            EventId     = $Event.EventId
+            ErrorCode    = $Code
+            LogName      = $Event.LogName
+            ProviderName = $Event.ProviderName
+            EventId      = $Event.EventId
             PackageName = $Event.PackageName
             TimeCreated = $Event.TimeCreated
         }
@@ -422,7 +473,7 @@ $ErrorCodeRows = foreach ($Event in $AllEvents) {
 }
 
 $ErrorCodeRows |
-    Group-Object ErrorCode, LogName, EventId |
+    Group-Object ErrorCode, LogName, ProviderName, EventId |
     ForEach-Object {
         $Example = $_.Group | Select-Object -First 1
         $Ordered = $_.Group | Sort-Object TimeCreated
@@ -430,6 +481,7 @@ $ErrorCodeRows |
         [pscustomobject]@{
             ErrorCode     = $Example.ErrorCode
             LogName       = $Example.LogName
+            ProviderName  = $Example.ProviderName
             EventId       = $Example.EventId
             Count         = $_.Count
             FirstObserved = $Ordered[0].TimeCreated
@@ -460,6 +512,127 @@ $AllEvents |
     Sort-Object Count -Descending |
     Export-Csv -LiteralPath (
         Join-Path $OutputDirectory 'Summary-ByPackage.csv'
+    ) -NoTypeInformation -Encoding UTF8
+
+# Keep the original requested-window summaries above, and also emit a second
+# view bounded by the most recent boot. When the boot predates the requested
+# collection window, the post-boot view is necessarily truncated to StartTime.
+$PostBootEvents = @(
+    $AllEvents |
+        Where-Object { $_.TimeCreated -ge $PostBootStartTime }
+)
+
+$PostBootEvents |
+    Sort-Object TimeCreated |
+    Export-Csv -LiteralPath (
+        Join-Path $OutputDirectory 'PostBoot-Relevant-Events.csv'
+    ) -NoTypeInformation -Encoding UTF8
+
+$PostBootEvents |
+    Group-Object LogName, ProviderName, EventId, Level |
+    ForEach-Object {
+        $Example = $_.Group | Select-Object -First 1
+        $Ordered = $_.Group | Sort-Object TimeCreated
+
+        [pscustomobject]@{
+            LogName       = $Example.LogName
+            ProviderName  = $Example.ProviderName
+            EventId       = $Example.EventId
+            Level         = $Example.Level
+            Count         = $_.Count
+            FirstObserved = $Ordered[0].TimeCreated
+            LastObserved  = $Ordered[-1].TimeCreated
+        }
+    } |
+    Sort-Object Count -Descending |
+    Export-Csv -LiteralPath (
+        Join-Path $OutputDirectory 'Summary-PostBoot-ByLog-EventId.csv'
+    ) -NoTypeInformation -Encoding UTF8
+
+$PostBootErrorCodeRows = foreach ($Event in $PostBootEvents) {
+    if ([string]::IsNullOrWhiteSpace($Event.ErrorCodes)) {
+        continue
+    }
+
+    foreach ($Code in $Event.ErrorCodes -split ';') {
+        [pscustomobject]@{
+            ErrorCode    = $Code
+            LogName      = $Event.LogName
+            ProviderName = $Event.ProviderName
+            EventId      = $Event.EventId
+            PackageName  = $Event.PackageName
+            TimeCreated  = $Event.TimeCreated
+        }
+    }
+}
+
+$PostBootErrorCodeRows |
+    Group-Object ErrorCode, LogName, ProviderName, EventId |
+    ForEach-Object {
+        $Example = $_.Group | Select-Object -First 1
+        $Ordered = $_.Group | Sort-Object TimeCreated
+
+        [pscustomobject]@{
+            ErrorCode     = $Example.ErrorCode
+            LogName       = $Example.LogName
+            ProviderName  = $Example.ProviderName
+            EventId       = $Example.EventId
+            Count         = $_.Count
+            FirstObserved = $Ordered[0].TimeCreated
+            LastObserved  = $Ordered[-1].TimeCreated
+        }
+    } |
+    Sort-Object Count -Descending |
+    Export-Csv -LiteralPath (
+        Join-Path $OutputDirectory 'Summary-PostBoot-ByErrorCode.csv'
+    ) -NoTypeInformation -Encoding UTF8
+
+$PostBootEvents |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_.PackageName) } |
+    Group-Object PackageName, EventId, ErrorCodes |
+    ForEach-Object {
+        $Example = $_.Group | Select-Object -First 1
+        $Ordered = $_.Group | Sort-Object TimeCreated
+
+        [pscustomobject]@{
+            PackageName   = $Example.PackageName
+            EventId       = $Example.EventId
+            ErrorCodes    = $Example.ErrorCodes
+            Count         = $_.Count
+            FirstObserved = $Ordered[0].TimeCreated
+            LastObserved  = $Ordered[-1].TimeCreated
+        }
+    } |
+    Sort-Object Count -Descending |
+    Export-Csv -LiteralPath (
+        Join-Path $OutputDirectory 'Summary-PostBoot-ByPackage.csv'
+    ) -NoTypeInformation -Encoding UTF8
+
+@(
+    [pscustomobject]@{
+        Scope            = 'RequestedWindow'
+        WindowStart      = $StartTime
+        WindowEnd        = Get-Date
+        EventCount       = $AllEvents.Count
+        BoundaryComplete = $true
+        Note             = 'Full requested collection window.'
+    }
+    [pscustomobject]@{
+        Scope            = 'PostBoot'
+        WindowStart      = $PostBootStartTime
+        WindowEnd        = Get-Date
+        EventCount       = $PostBootEvents.Count
+        BoundaryComplete = $LastBootWithinRequestedWindow
+        Note             = if ($LastBootWithinRequestedWindow) {
+            'Complete from the most recent boot.'
+        }
+        else {
+            'Most recent boot predates StartTime; post-boot view is truncated to the requested collection window.'
+        }
+    }
+) |
+    Export-Csv -LiteralPath (
+        Join-Path $OutputDirectory 'Event-Window-Summary.csv'
     ) -NoTypeInformation -Encoding UTF8
 
 $LogRetentionRows = foreach ($LogName in $TargetLogs) {
@@ -514,6 +687,7 @@ $RelevantServiceNames = @(
     'ClipSVC'
     'UserManager'
     'ProfSvc'
+    'OneDriveUpdaterService'
 )
 
 $ServiceRows = foreach ($ServiceName in $RelevantServiceNames) {
@@ -718,7 +892,6 @@ $ResiliencyRows |
         Join-Path $OutputDirectory 'AppRepository-ResiliencySummary.csv'
     ) -NoTypeInformation -Encoding UTF8
 
-$OperatingSystem = Get-CimInstance Win32_OperatingSystem
 $ComputerSystem = Get-CimInstance Win32_ComputerSystem
 
 $SystemSummary = [pscustomobject]@{
@@ -729,7 +902,10 @@ $SystemSummary = [pscustomobject]@{
     Caption             = $OperatingSystem.Caption
     Version             = $OperatingSystem.Version
     BuildNumber         = $OperatingSystem.BuildNumber
-    LastBootUpTime      = $OperatingSystem.LastBootUpTime
+    LastBootUpTime      = $LastBootUpTime
+    LastBootWithinRequestedWindow = $LastBootWithinRequestedWindow
+    PostBootWindowStart  = $PostBootStartTime
+    PostBootEventsExported = $PostBootEvents.Count
     UptimeDays          = [Math]::Round(
         ((Get-Date) - $OperatingSystem.LastBootUpTime).TotalDays,
         2
