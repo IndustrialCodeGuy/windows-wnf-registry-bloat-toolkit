@@ -1,8 +1,18 @@
-# Copyright 2026 Dan Michel
-# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Dan Michel
+# SPDX-License-Identifier: GPL-3.0-only
 #
-# Licensed under the Apache License, Version 2.0.
-# See the LICENSE file in the project root for license information.
+# This file is part of Windows WNF Registry Bloat Toolkit.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, version 3.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+# General Public License for more details.
+#
+# See the LICENSE file in the project root for the full license text.
 
 <#
 .SYNOPSIS
