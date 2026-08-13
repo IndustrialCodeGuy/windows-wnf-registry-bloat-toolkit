@@ -547,13 +547,13 @@ The tools are intended for authorized administration of systems you own or manag
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE).
+Copyright (C) 2026 Dan Michel.
 
-```text
-Copyright 2026 Dan Michel
-```
+This project is licensed under the [GNU General Public License version 3](LICENSE) (`GPL-3.0-only`).
 
-See [NOTICE](NOTICE) for attribution and project-independence information.
+Commercial and private use are permitted. If you redistribute the project, including modified or derivative versions, the GPLv3 license and corresponding-source requirements apply. This summary is provided for convenience; the `LICENSE` file contains the terms that govern use and distribution.
+
+See [NOTICE](NOTICE) for project attribution and independence information.
 
 ## Independence and trademarks
 
