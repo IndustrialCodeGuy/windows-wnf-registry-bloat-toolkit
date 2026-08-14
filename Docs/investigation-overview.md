@@ -63,7 +63,9 @@ When the system can no longer complete per-user AppContainer creation and AppX r
 - AAD BrokerPlugin failures can affect Microsoft authentication paths used by applications such as OneDrive.
 - New user profiles may contain an unusually small `%LOCALAPPDATA%\Packages` tree.
 
-This is why repeatedly rebuilding individual profiles or broadly re-registering AppX packages may fail to solve the underlying server-level condition.
+This is why repeatedly rebuilding individual profiles or broadly re-registering AppX packages may fail to solve the underlying server-level condition. Broad AppX re-registration can also complicate later diagnosis by changing per-user package state before the server-wide cause is corrected.
+
+After the targeted WNF cleanup in the originating environment, a subset of users with already populated `%LOCALAPPDATA%\Packages` trees continued to have OneDrive sign-in problems even though other users recovered. Those users had reportedly worked earlier, before broad AppX repair/re-registration attempts. It is plausible that the remaining failures reflect user-specific package/profile state altered during earlier troubleshooting, but that has not been proven. Treat residual per-user problems after server-level recovery as a separate layer of investigation rather than automatically attributing them to continuing WNF bloat.
 
 
 ## Evidence supporting the cleanup target
@@ -106,15 +108,22 @@ Old or stale folders should not automatically be treated as evidence. Use the `R
 
 The transition should be treated as a time range, not an exact failure timestamp.
 
-## Second check: structural inventory of the Notifications key
+## Second check: structural inventory of the WNF registry stores
 
-Run:
+For the permanent store that contains the confirmed target family, run:
 
 ```powershell
-.\Scripts\Get-WnfNotificationsStructuralInventory.ps1
+.\Scripts\Get-WnfPermanentNotificationsStructuralInventory.ps1
 ```
 
-This performs a read-only inventory of the root values under the Windows `Notifications` registry key.
+For comparison, the toolkit now includes separate read-only inventories for the other observed WNF registry stores:
+
+```powershell
+.\Scripts\Get-WnfVolatileNotificationsStructuralInventory.ps1
+.\Scripts\Get-WnfWellKnownNotificationsStructuralInventory.ps1
+```
+
+The permanent-store inventory examines root values under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Notifications`. All three inventories decode 16-character WNF state names into Version, Lifetime, DataScope, PermanentData, and Sequence fields so structural differences can be compared directly.
 
 The toolkit distinguishes two structures observed during the originating investigation:
 
@@ -145,7 +154,7 @@ Do not infer safety or danger from a single numeric threshold.
 Where practical, run the structural inventory on comparable systems:
 
 ```powershell
-.\Scripts\Get-WnfNotificationsStructuralInventory.ps1 `
+.\Scripts\Get-WnfPermanentNotificationsStructuralInventory.ps1 `
     -ServerLabel 'Comparison-RDS-01'
 ```
 
@@ -158,9 +167,11 @@ Useful comparisons include:
 
 The goal is to determine whether the repeated family is normal for the environment, whether it appears to accumulate with a particular workload, and whether the affected server is an outlier.
 
-Where recurrence testing is practical, also compare controlled RDS logins with printer redirection enabled and disabled. On the reproducible development host, printer redirection was the confirmed trigger for per-login target-family growth. A comparison host in the same environment currently does not reproduce that accumulation and retains a much larger historical `SWD\PRINTENUM` population; the reason for that difference remains unknown.
+Where recurrence testing is practical, also compare controlled RDS logins with printer redirection enabled and disabled. On the reproducible host, printer redirection is the confirmed trigger for repeated per-login target-family creation. On the comparison host, ordinary redirected-printer setup can occur without one new target state per printer/login, suggesting that existing device/WNF state is often reused.
 
-The registry entries themselves still do not expose a creator process or per-value creation timestamp. Procmon or equivalent tracing is required to attribute the creation path.
+Useful Procmon comparison points are `HKLM\SYSTEM\CurrentControlSet\Enum\SWD\PRINTENUM`, the redirected-printer registry trees, and the permanent WNF `Notifications` store. Include `RegSetValue`, `RegDeleteValue`, and `RegDeleteKey`; Session, User, Parent PID, and Command Line columns are useful when available.
+
+The registry entries themselves still do not expose a creator process or per-value creation timestamp. Procmon or equivalent tracing is required to attribute the creation path and determine whether a particular device setup caused a new WNF allocation.
 
 ## Fourth check: live WNF state
 
@@ -240,7 +251,9 @@ The toolkit cannot, by itself:
 - Determine a creation time or last-use time for each state from the registry entry alone.
 - Establish a universal "healthy" Notifications value count.
 - Establish that the redirected-printer/DsmSvc recurrence path observed on one host applies identically to every RDS host.
+- Prove the current reuse-versus-recreate hypothesis or identify the exact stable printer/device identity used for reuse.
 - Explain the currently observed host-to-host difference in `SWD\PRINTENUM` retention and recurrence behavior.
+- Prove that residual OneDrive failures in previously modified user profiles were caused by the earlier AppX re-registration attempts.
 - Guarantee that the accumulation will not recur after cleanup.
 - Determine that every 72-byte WNF registration on every Windows version is safe to remove.
 
