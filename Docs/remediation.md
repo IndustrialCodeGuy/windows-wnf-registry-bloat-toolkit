@@ -19,7 +19,7 @@ Recommended read-only checks:
 ```
 
 ```powershell
-.\Scripts\Get-WnfNotificationsStructuralInventory.ps1
+.\Scripts\Get-WnfPermanentNotificationsStructuralInventory.ps1
 ```
 
 ```powershell
@@ -208,7 +208,7 @@ Reboot the server after the targeted cleanup before returning it to normal produ
 
 Do not restore normal RDS/Gateway access until the initial validation is complete.
 
-Run `Get-WnfNotificationsStructuralInventory.ps1` after cleanup/reboot to confirm the exact target-family count. If cleanup removed every exact target-family member, `Audit-WnfSystemScopeLiveState.ps1` has no current family member to use as its automatic reference and will stop with a "No exact toolkit target-family value was found" message. In that post-cleanup context, zero exact matches in the structural inventory is the expected result.
+Run `Get-WnfPermanentNotificationsStructuralInventory.ps1` after cleanup/reboot to confirm the exact target-family count. If cleanup removed every exact target-family member, `Audit-WnfSystemScopeLiveState.ps1` has no current family member to use as its automatic reference and will stop with a "No exact toolkit target-family value was found" message. In that post-cleanup context, zero exact matches in the structural inventory is the expected result.
 
 ## Validation checklist
 
@@ -223,7 +223,8 @@ Confirm the following before returning the server to normal use:
 - Core package families such as Cortana/SearchUI, AAD BrokerPlugin, and ShellExperienceHost register successfully.
 - Microsoft authentication works for a test user.
 - OneDrive can sign in.
-- OneDrive Files On-Demand initializes and operates normally.
+- OneDrive Files On-Demand initializes and operates normally for a clean test profile.
+- Existing profiles that were modified during earlier AppX repair attempts are tested separately and are not assumed to recover solely because the server-level condition is corrected.
 - AppReadiness is no longer continuously retrying the same registration work.
 - AppXDeploymentServer no longer produces the same rapid registration-failure loop.
 - TWinUI activation failures return to normal background levels.
@@ -244,7 +245,7 @@ After recovery, record structural inventory results:
 - Before and after controlled RDS logon/logoff cycles.
 - Daily during the initial monitoring period.
 
-On the reproducible development host, controlled testing established that printer redirection was the trigger for per-login target-family growth. The number of new exact-family values matched the number of redirected printers observed in the test, and disabling printer redirection stopped that growth.
+On the reproducible development host, controlled testing established that printer redirection was the trigger for repeated target-family growth. In a controlled four-login capture, two redirected printers per login produced eight new exact-family values, and disabling printer redirection stopped that growth. A comparison host does not allocate one new target state for every redirected printer/login; larger captures suggest existing state is often reused there.
 
 If recurrence is observed, compare:
 
@@ -263,9 +264,9 @@ HKLM\SYSTEM\CurrentControlSet\Enum\SWD\PRINTENUM
 HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Print\Printers
 ```
 
-On the reproducible host, Procmon captured `DsmSvc` / `DeviceSetupManager.dll` calling `ZwCreateWnfStateName` during redirected-printer setup, and `spoolsv.exe` removing the session-specific redirected printer and `SWD\PRINTENUM` state during logoff.
+On the reproducible host, Procmon captured `DsmSvc` / `DeviceSetupManager.dll` calling `ZwCreateWnfStateName` during redirected-printer setup, and `spoolsv.exe` removing the session-specific redirected printer and `SWD\PRINTENUM` state during logoff. Delete operations were included in the capture, but no corresponding target-family `Notifications` deletion was observed.
 
-A comparison host currently does not reproduce the same WNF accumulation and retains a much larger historical `SWD\PRINTENUM` population. The reason for that host-to-host difference remains unknown.
+On the comparison host, a multi-user scan processed dozens of redirected `SWD\PRINTENUM` devices while allocating only a few new target states; a confirmed initial session with seven redirected printers produced four new states. Delete filters were also active there, with printer/SWD deletes observed but no target `Notifications` deletes in the analyzed interval. Current evidence therefore favors a reuse-versus-recreate difference rather than a simple healthy-logoff-delete versus failed-logoff-delete distinction.
 
 ## Actions not recommended
 
@@ -280,7 +281,7 @@ Do not:
 - Disable `BrokerInfrastructure` or `SystemEventsBroker`.
 - Keep `AppReadiness` disabled as a workaround unless the server's supported configuration specifically requires it.
 - Rebuild AppRepository or StateRepository databases as an initial response to lock/retry events.
-- Repeatedly run broad `Add-AppxPackage` re-registration while the server is still failing at the AppContainer/resource stage.
+- Repeatedly run broad `Add-AppxPackage` re-registration while the server is still failing at the AppContainer/resource stage. It may change user/package state and complicate later recovery analysis without correcting the server-level resource condition.
 - Run an older-version Microsoft WNF cleanup utility on Server 2019 solely because it addressed a similar historical problem.
 - Modify the remediation script's target hash or structural filters just to make an unrelated system match.
 
@@ -309,9 +310,10 @@ A successful remediation should produce both functional and technical improvemen
 Functional indicators:
 
 - Start and Search work.
-- Microsoft/OneDrive authentication works.
-- Files On-Demand works.
+- Microsoft/OneDrive authentication works for a clean/new test profile.
+- Files On-Demand works for a clean/new test profile.
 - New profiles initialize correctly.
+- Any remaining failures in previously modified profiles are isolated as user-state problems rather than assumed to represent continuing server-wide WNF failure.
 - RDS logons and CPU behavior improve.
 
 Technical indicators:
