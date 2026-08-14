@@ -26,8 +26,8 @@
         HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\VolatileNotifications
 
     For 16-character hexadecimal value names, the script decodes the WNF state
-    name using the standard WNF XOR mask and records the decoded metadata and
-    unique-ID range.
+    name using the standard WNF XOR mask and records Version, Lifetime,
+    DataScope, PermanentData, decoded metadata, and Sequence range.
 
     Because no investigation-specific VolatileNotifications family has yet
     been established, this script does not assume that the structures observed
@@ -177,6 +177,123 @@ function Copy-ByteRange {
 }
 
 
+function Get-WnfLifetimeName {
+    param(
+        [Parameter(Mandatory)]
+        [uint64] $Code
+    )
+
+    switch ([int] $Code) {
+        0 { return 'WellKnown' }
+        1 { return 'Permanent' }
+        2 { return 'Persistent' }
+        3 { return 'Temporary' }
+        default { return "Unknown($Code)" }
+    }
+}
+
+
+function Get-WnfDataScopeName {
+    param(
+        [Parameter(Mandatory)]
+        [uint64] $Code
+    )
+
+    switch ([int] $Code) {
+        0 { return 'System' }
+        1 { return 'Session' }
+        2 { return 'User' }
+        3 { return 'Process' }
+        4 { return 'Machine' }
+        default { return "Unknown($Code)" }
+    }
+}
+
+
+function Get-WnfDecodedFields {
+    param(
+        [Parameter(Mandatory)]
+        [uint64] $Decoded
+    )
+
+    [uint64] $Version =
+        $Decoded -band [uint64] 0xF
+
+    [uint64] $LifetimeCode =
+        ($Decoded -shr 4) -band [uint64] 0x3
+
+    [uint64] $DataScopeCode =
+        ($Decoded -shr 6) -band [uint64] 0xF
+
+    [uint64] $PermanentDataBit =
+        ($Decoded -shr 10) -band [uint64] 0x1
+
+    [uint64] $Sequence =
+        $Decoded -shr 11
+
+    return [pscustomobject]@{
+        Version       = $Version
+        LifetimeCode  = $LifetimeCode
+        Lifetime      = Get-WnfLifetimeName -Code $LifetimeCode
+        DataScopeCode = $DataScopeCode
+        DataScope     = Get-WnfDataScopeName -Code $DataScopeCode
+        PermanentData = ($PermanentDataBit -eq 1)
+        Sequence      = $Sequence
+        Metadata      = ($Decoded -band [uint64] 0x7FF)
+    }
+}
+
+
+function Add-WnfStateNameGroup {
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $Groups,
+
+        [Parameter(Mandatory)]
+        [psobject] $Fields,
+
+        [Parameter(Mandatory)]
+        [string] $ValueName
+    )
+
+    $GroupKey =
+        "$($Fields.Version)|$($Fields.LifetimeCode)|" +
+        "$($Fields.DataScopeCode)|$($Fields.PermanentData)|" +
+        ('0x{0:X3}' -f $Fields.Metadata)
+
+    if (-not $Groups.ContainsKey($GroupKey)) {
+        $Groups[$GroupKey] =
+            [pscustomobject]@{
+                Version          = [uint64] $Fields.Version
+                LifetimeCode     = [uint64] $Fields.LifetimeCode
+                Lifetime         = $Fields.Lifetime
+                DataScopeCode    = [uint64] $Fields.DataScopeCode
+                DataScope        = $Fields.DataScope
+                PermanentData    = [bool] $Fields.PermanentData
+                DecodedMetadata  = ('0x{0:X3}' -f $Fields.Metadata)
+                ValueCount       = [int64] 0
+                FirstValueName   = $ValueName
+                LastValueName    = $ValueName
+                MinimumSequence  = [uint64] $Fields.Sequence
+                MaximumSequence  = [uint64] $Fields.Sequence
+            }
+    }
+
+    $Group = $Groups[$GroupKey]
+    $Group.ValueCount = [int64] $Group.ValueCount + 1
+
+    if ($Fields.Sequence -lt $Group.MinimumSequence) {
+        $Group.MinimumSequence = [uint64] $Fields.Sequence
+        $Group.FirstValueName = $ValueName
+    }
+
+    if ($Fields.Sequence -gt $Group.MaximumSequence) {
+        $Group.MaximumSequence = [uint64] $Fields.Sequence
+        $Group.LastValueName = $ValueName
+    }
+}
+
+
 function Get-RegistryTypeName {
     param(
         [Parameter(Mandatory)]
@@ -240,6 +357,10 @@ $PayloadGroupsCsv = Join-Path $OutputDirectory (
     "Wnf-VolatilePayloadGroups-$SafeLabel-$Timestamp.csv"
 )
 
+$StateNameGroupsCsv = Join-Path $OutputDirectory (
+    "Wnf-VolatileDecodedStateNameGroups-$SafeLabel-$Timestamp.csv"
+)
+
 
 # ============================================================
 # Counters and collections
@@ -258,6 +379,7 @@ $Counters = [ordered]@{
 
 $StructureGroups = @{}
 $PayloadGroups = @{}
+$StateNameGroups = @{}
 
 $KeyPresent = $false
 $SubKeyCount = 0
@@ -388,12 +510,17 @@ try {
                     [uint64] $Decoded =
                         $Encoded -bxor $WnfXorMask
 
-                    [uint64] $Metadata =
-                        $Decoded -band [uint64] 0x7FF
+                    $WnfFields = Get-WnfDecodedFields -Decoded $Decoded
 
-                    $UniqueId = $Decoded -shr 11
+                    [uint64] $Metadata = $WnfFields.Metadata
+                    $UniqueId = $WnfFields.Sequence
                     $MetadataHex = Format-WnfMetadata -Metadata $Metadata
                     $HaveDecodedWnfName = $true
+
+                    Add-WnfStateNameGroup `
+                        -Groups $StateNameGroups `
+                        -Fields $WnfFields `
+                        -ValueName $ValueName
                 }
                 catch {
                     $MetadataHex = 'DecodeFailed'
@@ -546,6 +673,46 @@ finally {
 
 
 # ============================================================
+# Export decoded WNF state-name groups
+# ============================================================
+
+$StateNameGroupRows = @(
+    $StateNameGroups.Values |
+        Sort-Object `
+            @{ Expression = { $_.ValueCount }; Descending = $true }, `
+            @{ Expression = { $_.LifetimeCode }; Descending = $false }, `
+            @{ Expression = { $_.DataScopeCode }; Descending = $false }, `
+            @{ Expression = { $_.Version }; Descending = $false } |
+        ForEach-Object {
+            [pscustomobject]@{
+                ServerName       = $env:COMPUTERNAME
+                ServerLabel      = $ServerLabel
+                Version          = $_.Version
+                LifetimeCode     = $_.LifetimeCode
+                Lifetime         = $_.Lifetime
+                DataScopeCode    = $_.DataScopeCode
+                DataScope        = $_.DataScope
+                PermanentData    = $_.PermanentData
+                DecodedMetadata  = $_.DecodedMetadata
+                ValueCount       = $_.ValueCount
+                FirstValueName   = $_.FirstValueName
+                LastValueName    = $_.LastValueName
+                MinimumSequence  = ('0x{0:X}' -f $_.MinimumSequence)
+                MaximumSequence  = ('0x{0:X}' -f $_.MaximumSequence)
+            }
+        }
+)
+
+if ($StateNameGroupRows.Count -gt 0) {
+    $StateNameGroupRows |
+        Export-Csv `
+            -LiteralPath $StateNameGroupsCsv `
+            -NoTypeInformation `
+            -Encoding UTF8
+}
+
+
+# ============================================================
 # Export structural groups
 # ============================================================
 
@@ -658,12 +825,20 @@ $Summary = [pscustomobject]@{
     NonHexadecimalNames         = $Counters.NonHexadecimalNames
     RegBinaryValues             = $Counters.RegBinaryValues
     DistinctStructuralGroups    = $StructureGroups.Count
+    DistinctDecodedStateGroups  = $StateNameGroups.Count
     DistinctPayloadGroups       = $PayloadGroups.Count
     PayloadsHashed              = $Counters.PayloadsHashed
     PayloadHashSkippedLarge     = $Counters.PayloadHashSkippedLarge
     PayloadReadFailures         = $Counters.PayloadReadFailures
     EnumerationReadFailures     = $Counters.EnumerationReadFailures
     MaximumHashBytes            = $MaximumHashBytes
+    DecodedStateNameGroupsCsv   =
+        if ($StateNameGroupRows.Count -gt 0) {
+            $StateNameGroupsCsv
+        }
+        else {
+            ''
+        }
     StructureGroupsCsv          =
         if ($StructureGroupRows.Count -gt 0) {
             $StructureGroupsCsv
@@ -702,6 +877,7 @@ Write-Host "16-character WNF names:      $($Counters.HexadecimalWnfNames)"
 Write-Host "Non-WNF-style names:         $($Counters.NonHexadecimalNames)"
 Write-Host "REG_BINARY values:           $($Counters.RegBinaryValues)"
 Write-Host "Distinct structural groups:  $($StructureGroups.Count)"
+Write-Host "Decoded WNF layouts:         $($StateNameGroups.Count)"
 Write-Host "Distinct payload groups:     $($PayloadGroups.Count)"
 Write-Host "Payloads hashed:             $($Counters.PayloadsHashed)"
 Write-Host "Payloads skipped as large:   $($Counters.PayloadHashSkippedLarge)"
@@ -722,10 +898,31 @@ if ($StructureGroupRows.Count -gt 0) {
         Out-Host
 }
 
+if ($StateNameGroupRows.Count -gt 0) {
+    Write-Host 'Decoded WNF state-name groups:'
+
+    $StateNameGroupRows |
+        Format-Table `
+            ValueCount,
+            Version,
+            Lifetime,
+            DataScope,
+            PermanentData,
+            DecodedMetadata,
+            MinimumSequence,
+            MaximumSequence `
+            -AutoSize |
+        Out-Host
+}
+
 Write-Host "Summary CSV:                 $SummaryCsv"
 
 if ($StructureGroupRows.Count -gt 0) {
     Write-Host "Structure groups CSV:        $StructureGroupsCsv"
+}
+
+if ($StateNameGroupRows.Count -gt 0) {
+    Write-Host "Decoded state-name groups CSV: $StateNameGroupsCsv"
 }
 
 if ($PayloadGroupRows.Count -gt 0) {
