@@ -147,9 +147,14 @@ The `Exists, no strong live evidence` result is intentional terminology. A perma
 
 ## Confirmed recurrence and creation path
 
-Controlled post-cleanup testing on a reproducible Windows Server 2019 RDS host identified a repeatable trigger and creation path for the exact target family.
+For clarity, the investigation now uses two stable host labels instead of **good/bad**:
 
-With RDP printer redirection enabled on the reproducible host:
+- **Originating host** — the original case-study server that reached approximately **256,746** target-family values before cleanup.
+- **Reproduction host** — the former approximately **66,000-value comparison server** that now provides the clearest current reproduction of the printer-linked recurrence.
+
+Controlled post-cleanup testing on the **reproduction host** identified a repeatable trigger and creation path for the exact target family.
+
+With RDP printer redirection enabled on the reproduction host:
 
 - New exact 72-byte metadata-`0x011` target-family values appeared during login.
 - Disabling printer redirection stopped the observed per-login target-family growth.
@@ -162,15 +167,15 @@ Procmon also exposed the device lifecycle immediately around the write. A redire
 
 ### Logoff and teardown observations
 
-The same controlled bad-host trace captured complete printer teardown activity. `spoolsv.exe` removed the redirected printer registry trees and the corresponding `SWD\PRINTENUM` device state with successful `RegDeleteKey`/`RegDeleteValue` operations. No corresponding deletion of the target-family values under the WNF `Notifications` store was observed.
+The same controlled reproduction-host trace captured complete printer teardown activity. `spoolsv.exe` removed the redirected printer registry trees and the corresponding `SWD\PRINTENUM` device state with successful `RegDeleteKey`/`RegDeleteValue` operations. No corresponding deletion of the target-family values under the WNF `Notifications` store was observed.
 
 This is important because it weakens the earlier working theory that the main defect is simply a missing per-logoff WNF delete. The target state names decode as **Permanent / System** registrations, and later comparison-host captures likewise showed printer/SWD deletion activity without target `Notifications` deletion. Current evidence therefore favors a creation/reuse difference over a straightforward failed-logoff-cleanup model.
 
 The timed watcher provided a second, independent observation. At a 100 ms polling interval across multiple controlled logins, newly created target-family values showed no subscribers, no state data, no nonzero change stamps, and no non-quiescent samples during the captured observation windows.
 
-### Comparison-host difference and probable reuse behavior
+### Originating-host difference and probable reuse behavior
 
-A comparison RDS host in the same environment behaves materially differently.
+The originating RDS host behaves materially differently for the same test user.
 
 Earlier short captures showed many redirected-printer operations with no new target allocations. A larger multi-user capture then caught both existing-device enumeration and a small number of new target allocations:
 
@@ -178,23 +183,75 @@ Earlier short captures showed many redirected-printer operations with no new tar
 - Only four new exact target-family values were allocated during that activity.
 - A confirmed initial establishment of RDP session 117 presented seven redirected printers but produced four new target-family allocations rather than seven.
 - `RegDeleteKey` and `RegDeleteValue` were included in the capture. Hundreds of printer/SWD deletion operations occurred, but no target `Notifications` deletions were observed in the analyzed interval.
-- As ordinary users returned after cleanup, the comparison host's target-family count rose from roughly 20 to more than 200, yet later captures showed substantial repeated redirected-printer activity without one new target value per printer/login.
+- As ordinary users returned after cleanup, the originating host's target-family count rose from roughly 20 to more than 200, yet later captures showed substantial repeated redirected-printer activity without one new target value per printer/login.
 
-These observations support, but do not yet prove, a **reuse-versus-recreate** model: a healthy/bounded path may recognize an existing logical device registration and reuse persistent WNF state, while the affected path repeatedly allocates a fresh permanent/system state name when the redirected printer is instantiated. The exact stable identity or registry/device property used for reuse has not yet been identified.
+These observations support, but do not yet prove, a **divergent handling / reuse-versus-recreate** model: a bounded path may recognize an existing logical device registration or process the redirected printer without a fresh target-family allocation, while the affected path repeatedly allocates a new permanent/system state name. Later same-user A/B testing strengthened this distinction by showing `.DEFAULT` printer bookkeeping on the originating host versus fresh WNF values on the reproduction host. The exact stable identity or registry/device property controlling the behavior has not yet been identified.
 
-The comparison host also retains a large historical population of `SWD\PRINTENUM` entries, while the reproducible host exposes primarily the currently redirected printer instances during the same style of inspection. That difference remains a candidate part of the reuse mechanism rather than a proven cause.
+The originating host also retains a large historical population of `SWD\PRINTENUM` entries, while the reproduction host exposes primarily the currently redirected printer instances during the same style of inspection. That difference remains a candidate part of the reuse mechanism rather than a proven cause.
+
+### Redirected-printer bookkeeping in `.DEFAULT`
+
+A later inspection of the originating host found a second, independent form of printer-related registry accumulation under:
+
+```text
+HKEY_USERS\.DEFAULT\Printers\ConvertUserDevModesCount
+```
+
+The key contained **222,638 root values**. Of those, **222,016** value names contained the word `redirected` (approximately 99.7 percent), and the names largely resembled the redirected-printer names shown by Windows during RDS sessions. Nearby keys were much smaller: `DevModePerUser` contained 168 values and `DevModes2` contained none during the same inspection.
+
+Controlled testing on this host then produced a cleaner per-printer result. The same test client had **three redirected printers**: one physical printer, Microsoft Print to PDF, and OneNote. During a controlled login, only the physical printer created new `ConvertUserDevModesCount` state, and it created a **two-value pair**:
+
+```text
+AQ - Downstarirs (redirected <session>)
+\\<server>\AQ - Downstarirs (redirected <session>)
+```
+
+The two virtual printers produced no corresponding values in this key during that login, and the exact target WNF family under the permanent `Notifications` store did **not** increase.
+
+A same-user/client test on the reproduction host produced the opposite observable result: `ConvertUserDevModesCount` produced no corresponding redirected-printer values while the permanent WNF `Notifications` family grew. Subsequent repeated testing clarified the rate relationship:
+
+- With normal unrestricted printer redirection and three printers successfully presented, the reproduction host generally added **three new exact target-family WNF values per login** — approximately **one new WNF value per successfully redirected printer**.
+- Earlier +2 results were not stable. Additional cycling returned to the longer-term +3 pattern, and one client printer appeared not to have presented normally during the anomalous runs.
+- With the RDS policy **Redirect only the default client printer** enabled, the reproduction host generally added **one new target-family value per login**, regardless of whether the selected default was the physical printer, Microsoft Print to PDF, or OneNote. Across roughly two dozen rapid tests, occasional 0 and +2 deviations occurred; the reason remains unknown and may be related to redirection or timing variability.
+- With printer redirection disabled entirely, the reproduction host added **zero** target-family values for the controlled login.
+- Driver-path testing also did not remove the recurrence: using an installed manufacturer/native driver rather than relying solely on Easy Print did not stop allocation. Taken together, current evidence favors the redirected-printer instance/event itself over default-printer choice or the tested driver path as the controlling trigger on this host.
+
+This does not prove that the two registry stores are mutually exclusive implementation destinations, but it is strong A/B evidence that redirected-printer/device handling diverges between the hosts.
+
+The originating host is also **not globally WNF-silent**. Its target-family count has continued to rise as other users return and log in, even though this test user's controlled logins currently leave the target family flat. That makes the divergence more specific than a simple server-wide capability difference: user, client, printer, or retained device state appears to influence the path.
+
+The current model therefore distinguishes:
+
+```text
+RDP login / redirected printer creation
+        -> some printer/session state is recorded in .DEFAULT printer bookkeeping
+        -> some host/user/device combinations request fresh permanent WNF state
+        -> the controlling identity/property is still unknown
+```
+
+The project does **not** currently treat `ConvertUserDevModesCount` as the WNF root cause, and no cleanup of this key is recommended by the toolkit. Its value is presently forensic: it provides a per-session printer signal that can be compared directly with `SWD\PRINTENUM`, spooler activity, `DsmSvc`, and WNF allocation on the reproduction and originating hosts. Raw value counts should be interpreted as **value pairs rather than printer counts** where both the plain name and `\\SERVER\printer` form are present.
+
+Additional name-only testing showed why before/after baselines are important on a multi-user RDS host. One completed session with five redirected printers left **10 new values**—two names per printer—under `ConvertUserDevModesCount`, and those values were still present after the session had ended. Historical entries can therefore outlive the interactive session that created them; filtering the entire accumulated key by a redirected session suffix alone can mix old and current activity. For controlled testing, save the pre-login value-name set and compare only names newly added after the login.
+
+Historical references make this observation especially relevant without proving identity with the Server 2019 issue:
+
+- Microsoft KB2871131 documents an older RDS Print Spooler defect where new remote desktop sessions wrote printer settings under `HKEY_USERS\.DEFAULT\Printers\DevModes2` and failed to remove them, causing the `.DEFAULT` hive to grow continuously: <https://support.microsoft.com/kb/2871131>
+- Microsoft documents a separate redirected-printer leak where the Print Spooler added entries under `HKCU\Software\Microsoft\Windows NT\CurrentVersion\Devices`; over time, leaked entries accumulated permutations of client name, printer name, and session ID: <https://support.microsoft.com/en-us/servicing/os/windows-server/2017/03/invalid-redirected-printers-may-be-available-in-a-remote-desktop-services-session-that-connects-to-a>
+- Carl Webster/Bart Jacobs documented `.DEFAULT` printer-registry bloat that was printer-driver dependent: some printers added state only once while others added entries every connection/logon. Their case ultimately referenced Microsoft KB2871131: <https://www.carlwebster.com/the-curious-case-of-the-bloated-default-profile/>
+
+These are historical/architectural precedents, not evidence that the same fixed defects are present unchanged on Windows Server 2019.
 
 ### Negative and narrowing tests
 
 Several plausible side paths have been tested without changing the target-family recurrence:
 
-- Updating the reproducible host from OS build `17763.8511` to `17763.9020` did not by itself stop the per-printer recurrence.
+- Updating the reproduction host from OS build `17763.8511` to `17763.9020` did not by itself stop the per-printer recurrence.
 - Explicit testing of `fDisableCpm` did not change the recurrence pattern.
 - Installing a matching manufacturer printer driver and setting `UseUniversalPrinterDriverFirst = 4` so the redirected printer used the native/manufacturer driver instead of relying on Easy Print did not stop accumulation. Driver selection alone therefore does not explain the host difference.
 - Setting `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\RemoteRegistry\DisableIdleStop = 1` and keeping Remote Registry running did not change accumulation. Microsoft's separate Remote Registry/WNF paged-pool leak should not be conflated with this registry-value recurrence based on current evidence.
-- Targeted scans for PrintService Event ID 603 returned no matching events on either comparison server. Event 603 is therefore not part of the observed evidence chain in this environment.
+- Targeted scans for PrintService Event ID 603 returned no matching events on either principal RDS host. Event 603 is therefore not part of the observed evidence chain in this environment.
 
-These results establish a strong redirected-printer → software-device setup → `DsmSvc` → permanent WNF allocation path on the reproducible host, while the comparison host appears to allocate only when some additional initialization condition is met. They do not establish that every Windows Server 2019 RDS host behaves identically or that printer redirection is universally defective.
+These results establish a strong redirected-printer → software-device setup → `DsmSvc` → permanent WNF allocation path on the reproduction host, while the originating host appears to allocate only when some additional initialization condition is met. They do not establish that every Windows Server 2019 RDS host behaves identically or that printer redirection is universally defective.
 
 ## Production remediation result
 
@@ -334,7 +391,7 @@ Run the same structural inventory on other systems and compare:
 - Server role and interactive-session workload.
 - Whether the system shows matching AppX symptoms.
 
-In the originating environment, the affected host reached 256,746 members of the repeated family despite less than 24 hours of uptime. Two other RDS hosts using the same external access path had approximately 18,000 values after 16 days of uptime and approximately 66,000 after 37 days. A lightly used file server had 93 Notifications values, and two additional non-Gateway servers had none of the repeated 72-byte family.
+In the originating environment, the **originating host** reached 256,746 members of the repeated family despite less than 24 hours of uptime. Two other RDS hosts using the same external access path had approximately 18,000 values after 16 days of uptime and approximately 66,000 after 37 days. A lightly used file server had 93 Notifications values, and two additional non-Gateway servers had none of the repeated 72-byte family.
 
 Those comparisons established that the primary server was an extreme outlier, but they did not identify the cause. Subsequent controlled testing on a reproducible RDS host tied new target-family creation to redirected-printer setup and the `DsmSvc` / `DeviceSetupManager.dll` WNF-creation path described above.
 
@@ -342,7 +399,13 @@ The comparison hosts still demonstrate why a universal threshold is inappropriat
 
 ## Historical Microsoft precedent
 
-Microsoft has previously documented WNF registration leakage under the same Notifications registry key as a cause of:
+Microsoft has previously documented several relevant but distinct registry-growth failure modes in RDS/Windows:
+
+- WNF registration leakage under the same `Notifications` registry key.
+- Print Spooler growth of `HKEY_USERS\.DEFAULT\Printers\DevModes2` across remote desktop sessions (KB2871131).
+- Per-user redirected-printer leakage under `HKCU\Software\Microsoft\Windows NT\CurrentVersion\Devices`, including client/printer/session-specific names.
+
+The WNF case included:
 
 - Slow logons.
 - High CPU.
