@@ -202,8 +202,8 @@ The key contained **222,638 root values**. Of those, **222,016** value names con
 Controlled testing on this host then produced a cleaner per-printer result. The same test client had **three redirected printers**: one physical printer, Microsoft Print to PDF, and OneNote. During a controlled login, only the physical printer created new `ConvertUserDevModesCount` state, and it created a **two-value pair**:
 
 ```text
-AQ - Downstarirs (redirected <session>)
-\\<server>\AQ - Downstarirs (redirected <session>)
+Printer1 (redirected <session>)
+\\<server>\Printer1 (redirected <session>)
 ```
 
 The two virtual printers produced no corresponding values in this key during that login, and the exact target WNF family under the permanent `Notifications` store did **not** increase.
