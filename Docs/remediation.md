@@ -131,7 +131,7 @@ Before actual cleanup:
 
 A physical, hypervisor, or out-of-band console session with a local administrator remains the preferred cleanup path because it minimizes dependencies on the RDS user-session stack during low-level maintenance. The remediation script enforces the local-account and console-session checks independently by default. `-AllowNonLocalAccount` and `-AllowNonConsoleSession` are explicit, logged overrides for environments where those conditions have been deliberately reviewed and accepted.
 
-Controlled recurrence testing later identified redirected-printer setup, not RD Gateway itself, as the repeatable target-family creation trigger on a reproducible affected host.
+Controlled recurrence testing later identified redirected-printer setup, not RD Gateway itself, as the repeatable target-family creation trigger on the **reproduction host** (the former ~66,000-value comparison server).
 
 ## Automatic registry backup
 
@@ -245,7 +245,7 @@ After recovery, record structural inventory results:
 - Before and after controlled RDS logon/logoff cycles.
 - Daily during the initial monitoring period.
 
-On the reproducible development host, controlled testing established that printer redirection was the trigger for repeated target-family growth. In a controlled four-login capture, two redirected printers per login produced eight new exact-family values, and disabling printer redirection stopped that growth. A comparison host does not allocate one new target state for every redirected printer/login; larger captures suggest existing state is often reused there.
+On the **reproduction host**, controlled testing established that printer redirection was the trigger for repeated target-family growth. In a controlled four-login capture, two redirected printers per login produced eight new exact-family values. Later testing with three printers generally produced +3 new target-family values per login, while restricting redirection to only the default client printer generally produced +1 regardless of which tested printer was default. Disabling printer redirection produced +0. Occasional small deviations were observed during rapid testing, but the dominant relationship is approximately one new target-family WNF value per successfully redirected printer. The **originating host** (the original ~256,746-value case-study server) does not show that same per-printer allocation pattern for the same test user; its post-cleanup behavior suggests some redirected-printer state can be handled or reused without a fresh target allocation, even though other users continue to add target-family state.
 
 If recurrence is observed, compare:
 
@@ -264,9 +264,9 @@ HKLM\SYSTEM\CurrentControlSet\Enum\SWD\PRINTENUM
 HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Print\Printers
 ```
 
-On the reproducible host, Procmon captured `DsmSvc` / `DeviceSetupManager.dll` calling `ZwCreateWnfStateName` during redirected-printer setup, and `spoolsv.exe` removing the session-specific redirected printer and `SWD\PRINTENUM` state during logoff. Delete operations were included in the capture, but no corresponding target-family `Notifications` deletion was observed.
+On the reproduction host, Procmon captured `DsmSvc` / `DeviceSetupManager.dll` calling `ZwCreateWnfStateName` during redirected-printer setup, and `spoolsv.exe` removing the session-specific redirected printer and `SWD\PRINTENUM` state during logoff. Delete operations were included in the capture, but no corresponding target-family `Notifications` deletion was observed.
 
-On the comparison host, a multi-user scan processed dozens of redirected `SWD\PRINTENUM` devices while allocating only a few new target states; a confirmed initial session with seven redirected printers produced four new states. Delete filters were also active there, with printer/SWD deletes observed but no target `Notifications` deletes in the analyzed interval. Current evidence therefore favors a reuse-versus-recreate difference rather than a simple healthy-logoff-delete versus failed-logoff-delete distinction.
+On the **originating host**, a multi-user scan processed dozens of redirected `SWD\PRINTENUM` devices while allocating only a few new target states; a confirmed initial session with seven redirected printers produced four new states. Delete filters were also active there, with printer/SWD deletes observed but no target `Notifications` deletes in the analyzed interval. Current evidence therefore favors a reuse-versus-recreate difference rather than a simple healthy-logoff-delete versus failed-logoff-delete distinction.
 
 ## Actions not recommended
 
