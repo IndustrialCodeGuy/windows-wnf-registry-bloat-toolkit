@@ -167,9 +167,20 @@ Useful comparisons include:
 
 The goal is to determine whether the repeated family is normal for the environment, whether it appears to accumulate with a particular workload, and whether the affected server is an outlier.
 
-Where recurrence testing is practical, also compare controlled RDS logins with printer redirection enabled and disabled. On the reproducible host, printer redirection is the confirmed trigger for repeated per-login target-family creation. On the comparison host, ordinary redirected-printer setup can occur without one new target state per printer/login, suggesting that existing device/WNF state is often reused.
+Where recurrence testing is practical, also compare controlled RDS logins with printer redirection enabled and disabled. In the originating environment, use stable labels rather than good/bad: the **originating host** is the original approximately 256,746-value case-study server, while the **reproduction host** is the former approximately 66,000-value comparison server that now provides the clearest current recurrence. On the reproduction host, printer redirection is the confirmed trigger for repeated per-login target-family creation. On the originating host, ordinary redirected-printer setup can occur without a fresh target state for the same test user/login; however, other users still add target-family values. This points to a host/user/device-specific handling or reuse decision rather than a universal per-server rule.
 
 Useful Procmon comparison points are `HKLM\SYSTEM\CurrentControlSet\Enum\SWD\PRINTENUM`, the redirected-printer registry trees, and the permanent WNF `Notifications` store. Include `RegSetValue`, `RegDeleteValue`, and `RegDeleteKey`; Session, User, Parent PID, and Command Line columns are useful when available.
+
+For printer-lifecycle comparison, also record **counts and value names only** from these locations before and after controlled logins:
+
+```text
+HKEY_USERS\.DEFAULT\Printers\ConvertUserDevModesCount
+HKCU\Software\Microsoft\Windows NT\CurrentVersion\Devices
+```
+
+On the **originating host**, `ConvertUserDevModesCount` contained 222,638 values, 222,016 of whose names contained `redirected`. A same-user/client test with three redirected printers (one physical printer plus PDF and OneNote virtual printers) showed that the physical printer created a **two-value pair** in this key while the two virtual printers did not; the target WNF family remained unchanged for that user's login. On the **reproduction host**, `ConvertUserDevModesCount` added no corresponding redirected-printer values. Repeated testing there now shows the stronger pattern of approximately **one new target-family WNF value per successfully redirected printer per login**: normally +3 with three printers presented, and approximately +1 when server policy restricts redirection to only the default client printer. Changing which tested printer was default did not materially change the +1 result, and prior native/manufacturer-driver testing did not stop recurrence. Disabling printer redirection entirely produced +0. Occasional 0/+2 deviations occurred during rapid single-printer testing and remain unexplained. Treat the cross-key difference as evidence of divergent handling, not proof that the stores are mutually exclusive implementation paths. The originating host continues to accumulate target-family WNF state from other users, so it is not server-wide WNF-silent.
+
+Avoid reading/hashing every payload in a massively populated printer key merely to establish its size. `GetValueNames()`-style name/count inventories are much cheaper and preserve the historical names for later comparison. On busy RDS hosts, save a before-login name set and compare only newly added names; old `ConvertUserDevModesCount` entries can remain after their originating session has ended, and one physical printer may appear as two values (plain redirected name plus `\\SERVER\printer`).
 
 The registry entries themselves still do not expose a creator process or per-value creation timestamp. Procmon or equivalent tracing is required to attribute the creation path and determine whether a particular device setup caused a new WNF allocation.
 
@@ -257,7 +268,7 @@ The toolkit cannot, by itself:
 - Guarantee that the accumulation will not recur after cleanup.
 - Determine that every 72-byte WNF registration on every Windows version is safe to remove.
 
-External tracing can add evidence beyond the built-in scripts. On the reproducible host, Procmon identified the `DsmSvc` / `DeviceSetupManager.dll` → `ZwCreateWnfStateName` creation path.
+External tracing can add evidence beyond the built-in scripts. On the reproduction host, Procmon identified the `DsmSvc` / `DeviceSetupManager.dll` → `ZwCreateWnfStateName` creation path.
 
 The remediation tool is intentionally narrow and should remain that way.
 
